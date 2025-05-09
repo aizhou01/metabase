@@ -51,9 +51,9 @@
 
 (def ^:dynamic *max-rows*
   "Maximum number of rows returned when running a card.
-  It's 1000 because it matches with the limit for chain-filter.
+  It's 2000 because it matches with the limit for chain-filter.
   Maybe we should lower it for the sake of displaying a parameter dropdown."
-  1000)
+  2000)
 
 (defn- values-from-card-query
   [card value-field-ref opts]
