@@ -271,11 +271,11 @@
 #_{:clj-kondo/ignore [:deprecated-var]}
 (defmethod sql-jdbc.sync/db-default-timezone :mysql
   [_ spec]
-  (let [sql                                    (str "SELECT @@GLOBAL.time_zone AS global_tz,"
+  (let [sql                                    (str "SELECT @@time_zone AS global_tz,"
                                                     " @@system_time_zone AS system_tz,"
                                                     " time_format("
                                                     "   timediff("
-                                                    "      now(), convert_tz(now(), @@GLOBAL.time_zone, '+00:00')"
+                                                    "      now(), convert_tz(now(), @@time_zone, '+00:00')"
                                                     "   ),"
                                                     "   '%H:%i'"
                                                     " ) AS 'offset';")
@@ -1085,12 +1085,13 @@
                         [[:= :is_nullable [:inline "YES"]] :database-is-nullable]
                         [[:if [:= [:lower :column_default] [:inline "null"]] nil :column_default] :database-default]
 
-                        [[:and
-                          ;; mariadb
-                          [:!= :generation_expression nil]
-                          ;; mysql
-                          [:<> :generation_expression ""]]
-                         :database-is-generated]
+                        ;; 使用COALESCE处理可能不存在的列
+                        [[:raw "COALESCE(
+                                  NULLIF(c.generation_expression, ''), 
+                                  NULLIF(c.generation_expression, NULL),
+                                  ''
+                                ) != ''"] 
+                        :database-is-generated]
 
                         [[:nullif :c.column_comment [:inline ""]] :field-comment]]
                :from [[:information_schema.columns :c]]
