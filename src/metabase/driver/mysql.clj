@@ -1085,13 +1085,8 @@
                         [[:= :is_nullable [:inline "YES"]] :database-is-nullable]
                         [[:if [:= [:lower :column_default] [:inline "null"]] nil :column_default] :database-default]
 
-                        ;; 使用COALESCE处理可能不存在的列
-                        [[:raw "COALESCE(
-                                  NULLIF(c.generation_expression, ''), 
-                                  NULLIF(c.generation_expression, NULL),
-                                  ''
-                                ) != ''"] 
-                        :database-is-generated]
+                        ;; 直接设为false，不再检测生成列
+                        [false :database-is-generated]
 
                         [[:nullif :c.column_comment [:inline ""]] :field-comment]]
                :from [[:information_schema.columns :c]]

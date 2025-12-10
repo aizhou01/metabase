@@ -60,7 +60,7 @@
   "Maximum number of rows returned when running a card.
   It's 1000 because it matches with the limit for chain-filter.
   Maybe we should lower it for the sake of displaying a parameter dropdown."
-  1000)
+  2000)
 
 (mr/def ::values-from-card-query.options
   [:map
