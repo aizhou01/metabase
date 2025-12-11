@@ -271,7 +271,7 @@
 #_{:clj-kondo/ignore [:deprecated-var]}
 (defmethod sql-jdbc.sync/db-default-timezone :mysql
   [_ spec]
-  (let [sql                                    (str "SELECT 'SYSTEM' AS global_tz,'CTT' AS system_tz,'SYSTEM' AS `offset`;")
+  (let [sql                                    (str "SELECT '+08:00' AS global_tz,'CTT' AS system_tz,'08:00' AS `offset`;")
         [{:keys [global_tz system_tz offset]}] (jdbc/query spec sql)
         the-valid-id                           (fn [zone-id]
                                                  (when zone-id
