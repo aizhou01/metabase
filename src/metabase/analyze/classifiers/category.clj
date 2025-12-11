@@ -26,7 +26,7 @@
 (def ^Long auto-list-cardinality-threshold
   "Fields with less than this many distincy values should be given a `has_field_values` value of `list`, which means
   the Field should have FieldValues."
-  1000)
+  2000)
 
 (mu/defn- field-should-be-category? :- [:maybe :boolean]
   [fingerprint :- [:maybe ::lib.schema.metadata.fingerprint/fingerprint]
