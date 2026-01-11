@@ -1114,12 +1114,8 @@
                         [[:= :is_nullable [:inline "YES"]] :database-is-nullable]
                         [[:if [:= [:lower :column_default] [:inline "null"]] nil :column_default] :database-default]
 
-                        [[:and
-                          ;; mariadb
-                          [:!= :generation_expression nil]
-                          ;; mysql
-                          [:<> :generation_expression ""]]
-                         :database-is-generated]
+                        ;; 直接设为false，不再检测生成列
+                        [false :database-is-generated]
 
                         [[:nullif :c.column_comment [:inline ""]] :field-comment]]
                :from [[:information_schema.columns :c]]
