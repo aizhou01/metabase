@@ -15,12 +15,14 @@ interface Opts {
   selector: string;
   fileName: string;
   includeBranding: boolean;
+  userName?: string;
 }
 
 export const saveChartImage = async ({
   selector,
   fileName,
   includeBranding,
+  userName,
 }: Opts) => {
   const node = document.querySelector(selector);
 
@@ -70,6 +72,61 @@ export const saveChartImage = async ({
         branding.style.zIndex = "1000";
 
         node.appendChild(branding);
+      }
+
+      if (userName) {
+        const now = new Date();
+        const dateTime = `${now.toLocaleDateString(undefined, {
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        })} ${now.toLocaleTimeString(undefined, {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        })}`;
+        const watermarkText = `${userName} - ${dateTime}`;
+
+        const watermark = document.createElement("div");
+        watermark.style.cssText =
+          "position: absolute; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; overflow: hidden;";
+
+        const svgNs = "http://www.w3.org/2000/svg";
+        const svg = document.createElementNS(svgNs, "svg");
+        svg.setAttribute("width", "100%");
+        svg.setAttribute("height", "100%");
+
+        const defs = document.createElementNS(svgNs, "defs");
+        const pattern = document.createElementNS(svgNs, "pattern");
+        pattern.setAttribute("id", "chart-watermark");
+        pattern.setAttribute("x", "0");
+        pattern.setAttribute("y", "0");
+        pattern.setAttribute("height", "200");
+        pattern.setAttribute("width", "200");
+        pattern.setAttribute("patternUnits", "userSpaceOnUse");
+
+        const text = document.createElementNS(svgNs, "text");
+        text.setAttribute("x", "0");
+        text.setAttribute("y", "0");
+        text.setAttribute("font-size", "24");
+        text.setAttribute("font-weight", "600");
+        text.setAttribute("fill", "currentColor");
+        text.setAttribute("opacity", "0.12");
+        text.setAttribute("transform", "translate(20, 180) rotate(-45)");
+        text.textContent = watermarkText;
+
+        pattern.appendChild(text);
+        defs.appendChild(pattern);
+        svg.appendChild(defs);
+
+        const rect = document.createElementNS(svgNs, "rect");
+        rect.setAttribute("width", "100%");
+        rect.setAttribute("height", "100%");
+        rect.setAttribute("fill", "url(#chart-watermark)");
+        svg.appendChild(rect);
+
+        watermark.appendChild(svg);
+        node.appendChild(watermark);
       }
     },
   });

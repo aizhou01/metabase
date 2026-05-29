@@ -28,6 +28,7 @@ import {
   getUiControls,
 } from "metabase/query_builder/selectors";
 import { getIsDownloadingToImage } from "metabase/redux/downloads";
+import { getUser } from "metabase/selectors/user";
 import { getTokenFeature } from "metabase/setup/selectors";
 import { getFont } from "metabase/styled-components/selectors";
 import type { IconName, IconProps } from "metabase/ui";
@@ -94,7 +95,7 @@ import {
   VisualizationSlowSpinner,
 } from "./Visualization.styled";
 import { VisualizationRenderedWrapper } from "./VisualizationRenderedWrapper";
-import { Watermark } from "./Watermark";
+import { UserWatermark, Watermark } from "./Watermark";
 
 type StateDispatchProps = {
   dispatch: Dispatch;
@@ -102,6 +103,7 @@ type StateDispatchProps = {
 
 type StateProps = {
   hasDevWatermark: boolean;
+  currentUser: ReturnType<typeof getUser>;
   fontFamily: string;
   isRawTable: boolean;
   isEmbeddingSdk: boolean;
@@ -210,6 +212,7 @@ type VisualizationState = {
 
 const mapStateToProps = (state: State): StateProps => ({
   hasDevWatermark: getTokenFeature(state, "development_mode"),
+  currentUser: getUser(state),
   fontFamily: getFont(state),
   isRawTable: getIsShowingRawTable(state),
   isEmbeddingSdk: isEmbeddingSdk(),
@@ -652,6 +655,7 @@ class Visualization extends PureComponent<
       autoAdjustSettings,
       canToggleSeriesVisibility,
       className,
+      currentUser,
       dashboard,
       dashcard,
       dispatch,
@@ -907,7 +911,12 @@ class Visualization extends PureComponent<
               <div
                 data-card-key={getCardKey(series[0].card?.id)}
                 className={cx(CS.flex, CS.flexColumn, CS.flexFull)}
-                style={{ position: hasDevWatermark ? "relative" : undefined }}
+                style={{
+                  position:
+                    hasDevWatermark || currentUser
+                      ? "relative"
+                      : undefined,
+                }}
               >
                 <VisualizationRenderedWrapper
                   onRendered={this.handleVisualizationRendered}
@@ -1002,6 +1011,7 @@ class Visualization extends PureComponent<
                   />
                 </VisualizationRenderedWrapper>
                 {hasDevWatermark && <Watermark card={series[0].card} />}
+                {currentUser && <UserWatermark />}
               </div>
             )
           )}

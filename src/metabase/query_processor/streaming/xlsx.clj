@@ -5,6 +5,7 @@
    [dk.ative.docjure.spreadsheet :as spreadsheet] ; codespell:ignore ative
    [java-time.api :as t]
    [medley.core :as m]
+   [metabase.api.common :as api]
    [metabase.formatter.core :as formatter]
    [metabase.lib.schema.temporal-bucketing :as lib.schema.temporal-bucketing]
    [metabase.models.visualization-settings :as mb.viz]
@@ -594,6 +595,34 @@
     (.setAutoFilter ^SXSSFSheet sheet (new CellRangeAddress 0 0 0 (dec col-count)))
     (.createFreezePane ^SXSSFSheet sheet 0 1)))
 
+(defn- add-watermark-rows!
+  "Adds watermark rows (exporter info + date/time) at the bottom of the given sheet."
+  [^SXSSFSheet sheet]
+  (when api/*current-user-id*
+    (let [user         @api/*current-user*
+          common-name  (:common_name user)
+          email        (:email user)
+          export-time  (t/format "yyyy-MM-dd HH:mm:ss" (t/zoned-date-time))
+          last-row-num (.getLastRowNum sheet)
+          start-row    (if (neg? last-row-num) 0 (unchecked-inc (int last-row-num)))
+          workbook     (.getWorkbook sheet)
+          font         (doto (.createFont workbook)
+                          (.setItalic true)
+                          (.setColor (.getIndex org.apache.poi.ss.usermodel.IndexedColors/GREY_50_PERCENT))
+                          (.setFontHeightInPoints (short 10)))
+          style        (doto (.createCellStyle workbook)
+                          (.setFont font))]
+      (when common-name
+        (let [blank-row (.createRow sheet start-row)
+              info-row (.createRow sheet (unchecked-inc (int start-row)))
+              time-row (.createRow sheet (+ (int start-row) 2))]
+          (.createCell info-row 0)
+          (.setCellValue (.getCell info-row 0) (str "Exported by: " common-name " (" email ")"))
+          (.setCellStyle (.getCell info-row 0) style)
+          (.createCell time-row 0)
+          (.setCellValue (.getCell time-row 0) (str "Export time: " export-time))
+          (.setCellStyle (.getCell time-row 0) style))))))
+
 ;; Possible Functions: https://poi.apache.org/apidocs/dev/org/apache/poi/ss/usermodel/DataConsolidateFunction.html
 ;; I'm only including the keys that seem to work for our Pivot Tables as of 2024-06-06
 (defn- col->aggregation-fn
@@ -758,6 +787,8 @@
                   @pivot-data)
           ;; Auto-size columns if we never hit the row threshold, or a final row count was not provided
           (autosize-columns! @workbook-sheet))
+        (when-let [sheet @workbook-sheet]
+          (add-watermark-rows! sheet))
         (try
           (spreadsheet/save-workbook-into-stream! os workbook)
           (finally

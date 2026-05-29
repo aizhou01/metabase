@@ -149,6 +149,61 @@ const createHeaderElement = (dashboardName: string, marginBottom: number) => {
   return header;
 };
 
+const createWatermarkElement = (userName: string) => {
+  const now = new Date();
+  const dateTime = `${now.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  })} ${now.toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  })}`;
+  const watermarkText = `${userName} - ${dateTime}`;
+
+  const svgNs = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(svgNs, "svg");
+  svg.setAttribute("width", "100%");
+  svg.setAttribute("height", "100%");
+
+  const defs = document.createElementNS(svgNs, "defs");
+  const pattern = document.createElementNS(svgNs, "pattern");
+  pattern.setAttribute("id", "pdf-watermark");
+  pattern.setAttribute("x", "0");
+  pattern.setAttribute("y", "0");
+  pattern.setAttribute("height", "350");
+  pattern.setAttribute("width", "350");
+  pattern.setAttribute("patternUnits", "userSpaceOnUse");
+
+  const text = document.createElementNS(svgNs, "text");
+  text.setAttribute("x", "0");
+  text.setAttribute("y", "0");
+  text.setAttribute("font-size", "70");
+  text.setAttribute("font-weight", "700");
+  text.setAttribute("fill", "currentColor");
+  text.setAttribute("opacity", "0.15");
+  text.setAttribute("transform", "translate(35, 330) rotate(-45)");
+  text.textContent = watermarkText;
+
+  pattern.appendChild(text);
+  defs.appendChild(pattern);
+  svg.appendChild(defs);
+
+  const rect = document.createElementNS(svgNs, "rect");
+  rect.setAttribute("width", "100%");
+  rect.setAttribute("height", "100%");
+  rect.setAttribute("fill", "url(#pdf-watermark)");
+  svg.appendChild(rect);
+
+  const wrapper = document.createElement("div");
+  wrapper.style.cssText =
+    "position: absolute; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none;";
+  wrapper.appendChild(svg);
+
+  return wrapper;
+};
+
 const HEADER_MARGIN_BOTTOM = 12;
 const PARAMETERS_MARGIN_BOTTOM = 12;
 const PAGE_PADDING = 16;
@@ -158,6 +213,7 @@ interface SavePdfProps {
   selector: string;
   dashboardName: string;
   includeBranding: boolean;
+  userName?: string;
 }
 
 async function isValidColor(str: string) {
@@ -177,6 +233,7 @@ export const saveDashboardPdf = async ({
   selector,
   dashboardName,
   includeBranding,
+  userName,
 }: SavePdfProps) => {
   const dashboardRoot = document.querySelector(selector);
   const gridNode = dashboardRoot?.querySelector(".react-grid-layout");
@@ -265,6 +322,11 @@ export const saveDashboardPdf = async ({
       if (includeBranding) {
         const branding = createBrandingElement(size);
         node.insertBefore(branding, node.firstChild);
+      }
+
+      if (userName) {
+        const watermark = createWatermarkElement(userName);
+        node.appendChild(watermark);
       }
     },
   });

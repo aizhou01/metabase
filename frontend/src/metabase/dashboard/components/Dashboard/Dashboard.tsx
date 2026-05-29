@@ -15,6 +15,7 @@ import EmbedFrameS from "metabase/public/components/EmbedFrame/EmbedFrame.module
 import { FullWidthContainer } from "metabase/styled-components/layout/FullWidthContainer";
 import { Box, Flex, Loader } from "metabase/ui";
 import type { DashboardCard } from "metabase-types/api";
+import { UserWatermark } from "metabase/visualizations/components/Visualization/Watermark";
 
 import { DASHBOARD_PDF_EXPORT_ROOT_ID } from "../../constants";
 import {
@@ -127,6 +128,8 @@ const DashboardDefaultView = ({ className }: { className?: string }) => {
         </Box>
 
         <DashboardSidebars />
+
+        <UserWatermark />
       </Flex>
 
       <FilterApplyToast />

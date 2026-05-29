@@ -19,6 +19,7 @@ import { checkNotNull } from "metabase/lib/types";
 import * as Urls from "metabase/lib/urls";
 import { isJWT } from "metabase/lib/utils";
 import { isUuid } from "metabase/lib/uuid";
+import { getUser } from "metabase/selectors/user";
 import { getTokenFeature } from "metabase/setup/selectors";
 import { saveChartImage } from "metabase/visualizations/lib/save-chart-image";
 import { saveDashboardPdf } from "metabase/visualizations/lib/save-dashboard-pdf";
@@ -160,9 +161,12 @@ export const downloadToImage = createAsyncThunk(
     }: { opts: DownloadQueryResultsOpts; id: number },
     { getState },
   ) => {
-    const isWhitelabeled = getTokenFeature(getState(), "whitelabel");
+    const state = getState();
+    const isWhitelabeled = getTokenFeature(state, "whitelabel");
     const includeBranding = !isWhitelabeled;
     const fileName = getChartFileName(question, includeBranding);
+    const user = getUser(state);
+    const userName = user?.common_name;
 
     const chartSelector =
       dashcardId != null
@@ -176,6 +180,7 @@ export const downloadToImage = createAsyncThunk(
       selector: chartSelector,
       fileName,
       includeBranding,
+      userName,
     });
 
     return { id, fileName };
@@ -188,10 +193,13 @@ export const downloadDashboardToPdf = createAsyncThunk(
     { dashboard, id }: { dashboard: Dashboard; id: number },
     { getState },
   ) => {
-    const isWhitelabeled = getTokenFeature(getState(), "whitelabel");
+    const state = getState();
+    const isWhitelabeled = getTokenFeature(state, "whitelabel");
     const includeBranding = !isWhitelabeled;
     const cardNodeSelector = `#${DASHBOARD_PDF_EXPORT_ROOT_ID}`;
     const fileName = getDashboardPdfFileName(dashboard, includeBranding);
+    const user = getUser(state);
+    const userName = user?.common_name;
 
     // Long-running main thread blocking operation incoming; wait until the loader is painted.
     await waitUntilNextFramePainted();
@@ -201,6 +209,7 @@ export const downloadDashboardToPdf = createAsyncThunk(
       selector: cardNodeSelector,
       dashboardName: dashboard.name,
       includeBranding,
+      userName,
     });
 
     trackExportDashboardToPDF({
