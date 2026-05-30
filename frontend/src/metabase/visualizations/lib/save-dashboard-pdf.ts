@@ -151,15 +151,12 @@ const createHeaderElement = (dashboardName: string, marginBottom: number) => {
 
 const createWatermarkElement = (userName: string) => {
   const now = new Date();
-  const dateTime = `${now.toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  })} ${now.toLocaleTimeString(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  })}`;
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  const h = String(now.getHours()).padStart(2, "0");
+  const min = String(now.getMinutes()).padStart(2, "0");
+  const dateTime = `${y}/${m}/${d} ${h}:${min}`;
   const watermarkText = `${userName} - ${dateTime}`;
 
   const svgNs = "http://www.w3.org/2000/svg";
@@ -172,18 +169,18 @@ const createWatermarkElement = (userName: string) => {
   pattern.setAttribute("id", "pdf-watermark");
   pattern.setAttribute("x", "0");
   pattern.setAttribute("y", "0");
-  pattern.setAttribute("height", "350");
-  pattern.setAttribute("width", "350");
+  pattern.setAttribute("height", "220");
+  pattern.setAttribute("width", "220");
   pattern.setAttribute("patternUnits", "userSpaceOnUse");
 
   const text = document.createElementNS(svgNs, "text");
   text.setAttribute("x", "0");
   text.setAttribute("y", "0");
-  text.setAttribute("font-size", "70");
-  text.setAttribute("font-weight", "700");
+  text.setAttribute("font-size", "16");
+  text.setAttribute("font-weight", "600");
   text.setAttribute("fill", "currentColor");
   text.setAttribute("opacity", "0.15");
-  text.setAttribute("transform", "translate(35, 330) rotate(-45)");
+  text.setAttribute("transform", "translate(15, 210) rotate(-45)");
   text.textContent = watermarkText;
 
   pattern.appendChild(text);

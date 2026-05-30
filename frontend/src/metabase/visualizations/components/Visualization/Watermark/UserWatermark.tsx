@@ -5,17 +5,12 @@ import S from "./UserWatermark.module.css";
 
 function formatDateTime(): string {
   const now = new Date();
-  const date = now.toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-  const time = now.toLocaleTimeString(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-  return `${date} ${time}`;
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  const h = String(now.getHours()).padStart(2, "0");
+  const min = String(now.getMinutes()).padStart(2, "0");
+  return `${y}/${m}/${d} ${h}:${min}`;
 }
 
 export const UserWatermark = () => {
@@ -35,16 +30,16 @@ export const UserWatermark = () => {
             id="user-watermark-text"
             x="0"
             y="0"
-            height="350"
-            width="350"
+            height="220"
+            width="220"
             patternUnits="userSpaceOnUse"
           >
             <text
               x="0"
               y="0"
-              fontSize="70"
-              fontWeight="700"
-              transform="translate(35, 330) rotate(-45)"
+              fontSize="16"
+              fontWeight="600"
+              transform="translate(15, 210) rotate(-45)"
               textAnchor="start"
               className={S.text}
             >

@@ -76,15 +76,12 @@ export const saveChartImage = async ({
 
       if (userName) {
         const now = new Date();
-        const dateTime = `${now.toLocaleDateString(undefined, {
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-        })} ${now.toLocaleTimeString(undefined, {
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-        })}`;
+        const y = now.getFullYear();
+        const mo = String(now.getMonth() + 1).padStart(2, "0");
+        const d = String(now.getDate()).padStart(2, "0");
+        const h = String(now.getHours()).padStart(2, "0");
+        const min = String(now.getMinutes()).padStart(2, "0");
+        const dateTime = `${y}/${mo}/${d} ${h}:${min}`;
         const watermarkText = `${userName} - ${dateTime}`;
 
         const watermark = document.createElement("div");
@@ -101,18 +98,18 @@ export const saveChartImage = async ({
         pattern.setAttribute("id", "chart-watermark");
         pattern.setAttribute("x", "0");
         pattern.setAttribute("y", "0");
-        pattern.setAttribute("height", "200");
-        pattern.setAttribute("width", "200");
+        pattern.setAttribute("height", "220");
+        pattern.setAttribute("width", "220");
         pattern.setAttribute("patternUnits", "userSpaceOnUse");
 
         const text = document.createElementNS(svgNs, "text");
         text.setAttribute("x", "0");
         text.setAttribute("y", "0");
-        text.setAttribute("font-size", "24");
+        text.setAttribute("font-size", "16");
         text.setAttribute("font-weight", "600");
         text.setAttribute("fill", "currentColor");
-        text.setAttribute("opacity", "0.12");
-        text.setAttribute("transform", "translate(20, 180) rotate(-45)");
+        text.setAttribute("opacity", "0.15");
+        text.setAttribute("transform", "translate(15, 210) rotate(-45)");
         text.textContent = watermarkText;
 
         pattern.appendChild(text);

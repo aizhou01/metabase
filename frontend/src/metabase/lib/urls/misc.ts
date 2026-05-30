@@ -3,7 +3,7 @@ import type {
   TableExportFormat,
 } from "metabase/common/types/export";
 
-export const exportFormats: TableExportFormat[] = ["csv", "xlsx", "json"];
+export const exportFormats: TableExportFormat[] = ["xlsx"];
 export const exportFormatPng: ExportFormat = "png";
 
 export function accountSettings() {

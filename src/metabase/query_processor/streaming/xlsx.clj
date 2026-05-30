@@ -596,32 +596,24 @@
     (.createFreezePane ^SXSSFSheet sheet 0 1)))
 
 (defn- add-watermark-rows!
-  "Adds watermark rows (exporter info + date/time) at the bottom of the given sheet."
-  [^SXSSFSheet sheet]
-  (when api/*current-user-id*
-    (let [user         @api/*current-user*
-          common-name  (:common_name user)
-          email        (:email user)
-          export-time  (t/format "yyyy-MM-dd HH:mm:ss" (t/zoned-date-time))
-          last-row-num (.getLastRowNum sheet)
-          start-row    (if (neg? last-row-num) 0 (unchecked-inc (int last-row-num)))
-          workbook     (.getWorkbook sheet)
-          font         (doto (.createFont workbook)
-                          (.setItalic true)
-                          (.setColor (.getIndex org.apache.poi.ss.usermodel.IndexedColors/GREY_50_PERCENT))
-                          (.setFontHeightInPoints (short 10)))
-          style        (doto (.createCellStyle workbook)
-                          (.setFont font))]
-      (when common-name
-        (let [blank-row (.createRow sheet start-row)
-              info-row (.createRow sheet (unchecked-inc (int start-row)))
-              time-row (.createRow sheet (+ (int start-row) 2))]
-          (.createCell info-row 0)
-          (.setCellValue (.getCell info-row 0) (str "Exported by: " common-name " (" email ")"))
-          (.setCellStyle (.getCell info-row 0) style)
-          (.createCell time-row 0)
-          (.setCellValue (.getCell time-row 0) (str "Export time: " export-time))
-          (.setCellStyle (.getCell time-row 0) style))))))
+  "Adds watermark rows (exporter info + date/time) at the given row position."
+  [^SXSSFSheet sheet start-row ^String common-name ^String email]
+  (let [export-time (t/format "yyyy-MM-dd HH:mm:ss" (t/zoned-date-time))
+        workbook    (.getWorkbook sheet)
+        font        (doto (.createFont workbook)
+                       (.setItalic true)
+                       (.setColor (.getIndex org.apache.poi.ss.usermodel.IndexedColors/GREY_40_PERCENT))
+                       (.setFontHeightInPoints (short 12)))
+        style       (doto (.createCellStyle workbook)
+                       (.setFont font))]
+    (let [info-row (.createRow sheet (int start-row))
+          time-row (.createRow sheet (unchecked-inc (int start-row)))]
+      (.createCell info-row 0)
+      (.setCellValue (.getCell info-row 0) (str "Exported by: " common-name " (" email ")"))
+      (.setCellStyle (.getCell info-row 0) style)
+      (.createCell time-row 0)
+      (.setCellValue (.getCell time-row 0) (str "Export time: " export-time))
+      (.setCellStyle (.getCell time-row 0) style))))
 
 ;; Possible Functions: https://poi.apache.org/apidocs/dev/org/apache/poi/ss/usermodel/DataConsolidateFunction.html
 ;; I'm only including the keys that seem to work for our Pivot Tables as of 2024-06-06
@@ -703,12 +695,20 @@
         workbook-sheet       (volatile! nil)
         styles               (volatile! nil)
         pivot-data           (volatile! nil)
-        pivot-grouping-index (volatile! nil)]
+        pivot-grouping-index (volatile! nil)
+        user-common-name     (volatile! nil)
+        user-email           (volatile! nil)
+        last-row-num         (volatile! 0)]
     (reify qp.si/StreamingResultsWriter
       (begin! [_ {{:keys [ordered-cols results_timezone format-rows? pivot? pivot-export-options]
                    :or   {format-rows? true
                           pivot?       false}} :data}
                viz-settings]
+        ;; Capture user info while we are still on the handler thread
+        (when api/*current-user-id*
+          (when-let [user @api/*current-user*]
+            (vreset! user-common-name (:common_name user))
+            (vreset! user-email (:email user))))
         (let [pivot-spec       (when (and pivot? pivot-export-options (qp.settings/enable-pivoted-exports))
                                  (pivot-opts->pivot-spec (merge {:pivot-cols []
                                                                  :pivot-rows []}
@@ -749,10 +749,12 @@
             (vswap! pivot-data update-in [:data :rows] conj! ordered-row)
             (when (or (not group)
                       (= qp.pivot.postprocess/non-pivot-row-group (int group)))
-              (let [{:keys [cell-styles typed-cell-styles]} @styles]
-                (add-row! @workbook-sheet (inc row-num) row' ordered-cols' viz-settings cell-styles typed-cell-styles)
-                (when (= (inc row-num) *auto-sizing-threshold*)
-                  (autosize-columns! @workbook-sheet)))))))
+              (let [row-pos (inc row-num)]
+                (vreset! last-row-num row-pos)
+                (let [{:keys [cell-styles typed-cell-styles]} @styles]
+                  (add-row! @workbook-sheet row-pos row' ordered-cols' viz-settings cell-styles typed-cell-styles)
+                  (when (= row-pos *auto-sizing-threshold*)
+                    (autosize-columns! @workbook-sheet))))))))
 
       (finish! [_ {:keys [row_count]}]
         (when @pivot-data
@@ -787,8 +789,12 @@
                   @pivot-data)
           ;; Auto-size columns if we never hit the row threshold, or a final row count was not provided
           (autosize-columns! @workbook-sheet))
+        ;; Add watermark after all data rows (header at row 0, data at rows 1..N)
         (when-let [sheet @workbook-sheet]
-          (add-watermark-rows! sheet))
+          (when-let [cn @user-common-name]
+            (let [data-rows (or row_count @last-row-num)
+                  start-row (if (pos? (int data-rows)) (unchecked-inc (int data-rows)) 1)]
+              (add-watermark-rows! sheet start-row cn @user-email))))
         (try
           (spreadsheet/save-workbook-into-stream! os workbook)
           (finally
