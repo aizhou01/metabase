@@ -590,30 +590,36 @@
 (defn- setup-header-row!
   "Turns on auto-filter for the header row, which adds a button to each header cell that allows columns to be
   filtered and sorted. Also freezes the header row so that it floats above the data."
-  [sheet col-count]
-  (when (> col-count 0)
-    (.setAutoFilter ^SXSSFSheet sheet (new CellRangeAddress 0 0 0 (dec col-count)))
-    (.createFreezePane ^SXSSFSheet sheet 0 1)))
+  ([sheet col-count]
+   (setup-header-row! sheet col-count 0))
+  ([sheet col-count start-row]
+   (when (> col-count 0)
+     (.setAutoFilter ^SXSSFSheet sheet (new CellRangeAddress start-row start-row 0 (dec col-count)))
+     (.createFreezePane ^SXSSFSheet sheet 0 (inc start-row)))))
+
+(def WATERMARK_ROW_COUNT
+  "Number of rows used for watermark at the top of the sheet."
+  2)
 
 (defn- add-watermark-rows!
-  "Adds watermark rows (exporter info + date/time) at the given row position."
-  [^SXSSFSheet sheet start-row ^String common-name ^String email]
-  (let [export-time (t/format "yyyy-MM-dd HH:mm:ss" (t/zoned-date-time))
+  "Writes watermark rows (exporter + timestamp) at row 0 and row 1 of the sheet."
+  [^SXSSFSheet sheet ^String common-name ^String email]
+  (let [export-time (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))
         workbook    (.getWorkbook sheet)
         font        (doto (.createFont workbook)
                        (.setItalic true)
                        (.setColor (.getIndex org.apache.poi.ss.usermodel.IndexedColors/GREY_40_PERCENT))
                        (.setFontHeightInPoints (short 12)))
         style       (doto (.createCellStyle workbook)
-                       (.setFont font))]
-    (let [info-row (.createRow sheet (int start-row))
-          time-row (.createRow sheet (unchecked-inc (int start-row)))]
-      (.createCell info-row 0)
-      (.setCellValue (.getCell info-row 0) (str "Exported by: " common-name " (" email ")"))
-      (.setCellStyle (.getCell info-row 0) style)
-      (.createCell time-row 0)
-      (.setCellValue (.getCell time-row 0) (str "Export time: " export-time))
-      (.setCellStyle (.getCell time-row 0) style))))
+                       (.setFont font))
+        info-row    (.createRow sheet 0)
+        time-row    (.createRow sheet 1)]
+    (.createCell info-row 0)
+    (.setCellValue (.getCell info-row 0) (str "Exported by: " common-name " (" email ")"))
+    (.setCellStyle (.getCell info-row 0) style)
+    (.createCell time-row 0)
+    (.setCellValue (.getCell time-row 0) (str "Export time: " export-time))
+    (.setCellStyle (.getCell time-row 0) style)))
 
 ;; Possible Functions: https://poi.apache.org/apidocs/dev/org/apache/poi/ss/usermodel/DataConsolidateFunction.html
 ;; I'm only including the keys that seem to work for our Pivot Tables as of 2024-06-06
@@ -698,7 +704,7 @@
         pivot-grouping-index (volatile! nil)
         user-common-name     (volatile! nil)
         user-email           (volatile! nil)
-        last-row-num         (volatile! 0)]
+        row-offset           (volatile! 0)]
     (reify qp.si/StreamingResultsWriter
       (begin! [_ {{:keys [ordered-cols results_timezone format-rows? pivot? pivot-export-options]
                    :or   {format-rows? true
@@ -725,10 +731,17 @@
                       :timezone             results_timezone
                       :format-rows?         format-rows?
                       :pivot-export-options pivot-export-options})
-            (let [sheet (init-workbook {:workbook     workbook
-                                        :ordered-cols non-pivot-cols
-                                        :viz-settings viz-settings
-                                        :format-rows? true})]
+            ;; Non-pivot: create sheet with watermark rows at top (before header)
+            (let [sheet       (spreadsheet/add-sheet! workbook (tru "Query result"))
+                  offset      (if @user-common-name
+                                (do (add-watermark-rows! sheet @user-common-name @user-email)
+                                    WATERMARK_ROW_COUNT)
+                                0)
+                  col-count   (count non-pivot-cols)]
+              (vreset! row-offset offset)
+              (track-n-cols-for-autosizing! col-count sheet)
+              (setup-header-row! sheet col-count offset)
+              (spreadsheet/add-row! sheet (streaming.common/column-titles non-pivot-cols (or viz-settings {}) format-rows?))
               (set-no-style-custom-helper! sheet)
               (vreset! styles (generate-styles workbook viz-settings non-pivot-cols format-rows?))
               (vreset! workbook-sheet sheet)))))
@@ -741,31 +754,23 @@
               group                (get row @pivot-grouping-index)
               [row' ordered-cols'] (cond->> [ordered-row ordered-cols]
                                      @pivot-grouping-index
-                                     ;; We need to remove the pivot-grouping key if it's there, because we don't show
-                                     ;; it in the export. `ordered-cols` is a parallel array, so we must remove the
-                                     ;; corresponding col.
                                      (map #(m/remove-nth @pivot-grouping-index %)))]
           (if @pivot-data
             (vswap! pivot-data update-in [:data :rows] conj! ordered-row)
             (when (or (not group)
                       (= qp.pivot.postprocess/non-pivot-row-group (int group)))
-              (let [row-pos (inc row-num)]
-                (vreset! last-row-num row-pos)
-                (let [{:keys [cell-styles typed-cell-styles]} @styles]
-                  (add-row! @workbook-sheet row-pos row' ordered-cols' viz-settings cell-styles typed-cell-styles)
-                  (when (= row-pos *auto-sizing-threshold*)
-                    (autosize-columns! @workbook-sheet))))))))
+              (let [row-pos (+ (inc row-num) @row-offset)
+                    {:keys [cell-styles typed-cell-styles]} @styles]
+                (add-row! @workbook-sheet row-pos row' ordered-cols' viz-settings cell-styles typed-cell-styles)
+                (when (= row-pos (+ @row-offset *auto-sizing-threshold*))
+                  (autosize-columns! @workbook-sheet)))))))
 
       (finish! [_ {:keys [row_count]}]
         (when @pivot-data
-          ;; For pivoted exports, we pivot in-memory (same as CSVs) and then write the results to the
-          ;; document all at once
           (let [{:keys [settings non-pivot-cols pivot-export-options timezone format-rows?]} @pivot-data
                 {:keys [pivot-rows pivot-cols pivot-measures]} pivot-export-options
-
                 {:keys [cell-styles typed-cell-styles]}
                 (generate-styles workbook settings non-pivot-cols format-rows?)
-
                 formatters (make-formatters cell-styles
                                             non-pivot-cols
                                             pivot-rows
@@ -787,14 +792,14 @@
         (when (or (nil? row_count)
                   (< row_count *auto-sizing-threshold*)
                   @pivot-data)
-          ;; Auto-size columns if we never hit the row threshold, or a final row count was not provided
           (autosize-columns! @workbook-sheet))
-        ;; Add watermark after all data rows (header at row 0, data at rows 1..N)
+        ;; Set header/footer for print layout visibility
         (when-let [sheet @workbook-sheet]
           (when-let [cn @user-common-name]
-            (let [data-rows (or row_count @last-row-num)
-                  start-row (if (pos? (int data-rows)) (unchecked-inc (int data-rows)) 1)]
-              (add-watermark-rows! sheet start-row cn @user-email))))
+            (let [export-time (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))
+                  header-text (str "Exported by: " cn " (" (or @user-email "") ") - " export-time)]
+              (doto (.getHeader sheet)
+                (.setCenter header-text)))))
         (try
           (spreadsheet/save-workbook-into-stream! os workbook)
           (finally
