@@ -810,8 +810,8 @@
                     (.addPicture xssf-wb img-bytes Workbook/PICTURE_TYPE_PNG)
                     ;; The picture we just added is the last one in the list
                     (when-let [pic-data (last (.getAllPictures xssf-wb))]
-                      (doseq [^XSSFSheet s (.getSheets xssf-wb)]
-                        (.setBackgroundImage s pic-data)))))
+                      (dotimes [i (.getNumberOfSheets xssf-wb)]
+                        (.setBackgroundImage ^XSSFSheet (.getSheetAt xssf-wb i) pic-data)))))
                 (.write xssf-wb os))
               ;; No user — write buffer bytes directly to output stream
               (.write os buf-bytes))))))))
