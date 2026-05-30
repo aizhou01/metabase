@@ -156,7 +156,7 @@ const createWatermarkElement = (userName: string) => {
   const d = String(now.getDate()).padStart(2, "0");
   const h = String(now.getHours()).padStart(2, "0");
   const min = String(now.getMinutes()).padStart(2, "0");
-  const dateTime = `${y}/${m}/${d} ${h}:${min}`;
+  const dateTime = `${y}-${m}-${d} ${h}:${min}`;
   const watermarkText = `${userName} - ${dateTime}`;
 
   const svgNs = "http://www.w3.org/2000/svg";

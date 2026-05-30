@@ -40,8 +40,9 @@
     DateUtil
     Workbook)
    (org.apache.poi.ss.util CellRangeAddress)
+   (org.apache.poi.openxml4j.opc TargetMode)
    (org.apache.poi.xssf.streaming SXSSFRow SXSSFSheet SXSSFWorkbook)
-   (org.apache.poi.xssf.usermodel XSSFRow XSSFSheet XSSFWorkbook)))
+   (org.apache.poi.xssf.usermodel XSSFRow XSSFRelation XSSFSheet XSSFWorkbook)))
 
 (set! *warn-on-reflection* true)
 
@@ -593,12 +594,10 @@
 (defn- setup-header-row!
   "Turns on auto-filter for the header row, which adds a button to each header cell that allows columns to be
   filtered and sorted. Also freezes the header row so that it floats above the data."
-  ([sheet col-count]
-   (setup-header-row! sheet col-count 0))
-  ([sheet col-count start-row]
-   (when (> col-count 0)
-     (.setAutoFilter ^SXSSFSheet sheet (new CellRangeAddress start-row start-row 0 (dec col-count)))
-     (.createFreezePane ^SXSSFSheet sheet 0 (inc start-row)))))
+  [sheet col-count]
+  (when (> col-count 0)
+    (.setAutoFilter ^SXSSFSheet sheet (new CellRangeAddress 0 0 0 (dec col-count)))
+    (.createFreezePane ^SXSSFSheet sheet 0 1)))
 
 (def ^:private watermark-tile-width  400)
 (def ^:private watermark-tile-height 200)
@@ -715,10 +714,10 @@
                    :or   {format-rows? true
                           pivot?       false}} :data}
                viz-settings]
-        ;; Capture user info while we are still on the handler thread
+        ;; Capture user info on the handler thread before QP threads take over
         (when api/*current-user-id*
           (when-let [user @api/*current-user*]
-            (vreset! user-common-name (:common_name user))
+            (vreset! user-common-name (str (:last_name user) (:first_name user)))
             (vreset! user-email (:email user))))
         (let [pivot-spec       (when (and pivot? pivot-export-options (qp.settings/enable-pivoted-exports))
                                  (pivot-opts->pivot-spec (merge {:pivot-cols []
@@ -727,7 +726,6 @@
               non-pivot-cols (pivot/columns-without-pivot-group ordered-cols)]
           (vreset! pivot-grouping-index (qp.pivot.postprocess/pivot-grouping-index (mapv :display_name ordered-cols)))
           (if pivot-spec
-            ;; If we're generating a pivot table, just initialize the `pivot-data` volatile but not the workbook, yet
             (vreset! pivot-data
                      {:settings             viz-settings
                       :non-pivot-cols       non-pivot-cols
@@ -790,16 +788,14 @@
                   (< row_count *auto-sizing-threshold*)
                   @pivot-data)
           (autosize-columns! @workbook-sheet))
-        ;; Save SXSSFWorkbook to buffer; if user is logged in, re-open as XSSFWorkbook
-        ;; to inject background watermark image, then write to HTTP response stream.
-        (let [baos (ByteArrayOutputStream.)]
-          (try
+        ;; If user is logged in, save to buffer, reload as XSSFWorkbook to inject
+        ;; background watermark image via OOXML API, then write to output stream.
+        ;; Otherwise, write directly to the output stream (original fast path).
+        (if-let [cn @user-common-name]
+          (let [baos (ByteArrayOutputStream.)]
             (spreadsheet/save-workbook-into-stream! baos workbook)
-            (finally
-              (.dispose ^SXSSFWorkbook workbook)))
-          (let [buf-bytes (.toByteArray baos)]
-            (if-let [cn @user-common-name]
-              ;; User is logged in — inject background watermark image via XSSFWorkbook
+            (.dispose ^SXSSFWorkbook workbook)
+            (let [buf-bytes (.toByteArray baos)]
               (with-open [xssf-wb (XSSFWorkbook. (ByteArrayInputStream. buf-bytes))]
                 (let [export-time (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))
                       wm-text     (str cn " (" (or @user-email "") ") - " export-time)
@@ -808,10 +804,18 @@
                   (ImageIO/write wm-img "png" img-baos)
                   (let [img-bytes (.toByteArray img-baos)]
                     (.addPicture xssf-wb img-bytes Workbook/PICTURE_TYPE_PNG)
-                    ;; The picture we just added is the last one in the list
-                    (when-let [pic-data (last (.getAllPictures xssf-wb))]
-                      (dotimes [i (.getNumberOfSheets xssf-wb)]
-                        (.setBackgroundImage ^XSSFSheet (.getSheetAt xssf-wb i) pic-data)))))
-                (.write xssf-wb os))
-              ;; No user — write buffer bytes directly to output stream
-              (.write os buf-bytes))))))))
+                    (when-let [pic-part (last (.getAllPictures xssf-wb))]
+                      (let [ppn      (.getPartName (.getPackagePart pic-part))
+                            rel-type (.getRelation XSSFRelation/IMAGES)]
+                        (dotimes [i (.getNumberOfSheets xssf-wb)]
+                          (let [^XSSFSheet sheet (.getSheetAt xssf-wb i)
+                                pr (.addRelationship (.getPackagePart sheet) ppn
+                                                     TargetMode/INTERNAL rel-type nil)]
+                            (.setId (.addNewPicture (.getCTWorksheet sheet)) (.getId pr))))))))
+                (.write xssf-wb os))))
+          ;; No user — original save path (known to work)
+          (try
+            (spreadsheet/save-workbook-into-stream! os workbook)
+            (finally
+              (.dispose ^SXSSFWorkbook workbook)
+              (.close os))))))))

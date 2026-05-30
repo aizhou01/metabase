@@ -10,7 +10,7 @@ function formatDateTime(): string {
   const d = String(now.getDate()).padStart(2, "0");
   const h = String(now.getHours()).padStart(2, "0");
   const min = String(now.getMinutes()).padStart(2, "0");
-  return `${y}/${m}/${d} ${h}:${min}`;
+  return `${y}-${m}-${d} ${h}:${min}`;
 }
 
 export const UserWatermark = () => {
@@ -20,7 +20,7 @@ export const UserWatermark = () => {
     return null;
   }
 
-  const watermarkText = `${user.common_name} - ${formatDateTime()}`;
+  const watermarkText = `${user.last_name}${user.first_name} - ${formatDateTime()}`;
 
   return (
     <div className={S.Root} data-testid="user-watermark">

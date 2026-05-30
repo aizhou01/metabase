@@ -116,9 +116,9 @@
           ;; Write watermark comment rows for authenticated users
           (when api/*current-user-id*
             (let [user         @api/*current-user*
-                  common-name  (:common_name user)
+                  common-name  (str (:last_name user) (:first_name user))
                   email        (:email user)
-                  export-time  (t/format "yyyy-MM-dd HH:mm:ss" (t/zoned-date-time))]
+                  export-time  (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))]
               (when common-name
                 (write-csv writer [[(str "# Exported by: " common-name " (" email ")")]])
                 (write-csv writer [[(str "# Export time: " export-time)]]))))

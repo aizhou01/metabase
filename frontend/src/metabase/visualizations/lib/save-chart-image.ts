@@ -81,7 +81,7 @@ export const saveChartImage = async ({
         const d = String(now.getDate()).padStart(2, "0");
         const h = String(now.getHours()).padStart(2, "0");
         const min = String(now.getMinutes()).padStart(2, "0");
-        const dateTime = `${y}/${mo}/${d} ${h}:${min}`;
+        const dateTime = `${y}-${mo}-${d} ${h}:${min}`;
         const watermarkText = `${userName} - ${dateTime}`;
 
         const watermark = document.createElement("div");

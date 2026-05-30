@@ -166,7 +166,7 @@ export const downloadToImage = createAsyncThunk(
     const includeBranding = !isWhitelabeled;
     const fileName = getChartFileName(question, includeBranding);
     const user = getUser(state);
-    const userName = user?.common_name;
+    const userName = user ? `${user.last_name ?? ""}${user.first_name ?? ""}` : undefined;
 
     const chartSelector =
       dashcardId != null
@@ -199,7 +199,7 @@ export const downloadDashboardToPdf = createAsyncThunk(
     const cardNodeSelector = `#${DASHBOARD_PDF_EXPORT_ROOT_ID}`;
     const fileName = getDashboardPdfFileName(dashboard, includeBranding);
     const user = getUser(state);
-    const userName = user?.common_name;
+    const userName = user ? `${user.last_name ?? ""}${user.first_name ?? ""}` : undefined;
 
     // Long-running main thread blocking operation incoming; wait until the loader is painted.
     await waitUntilNextFramePainted();
