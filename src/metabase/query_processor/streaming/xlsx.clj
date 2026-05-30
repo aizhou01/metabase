@@ -21,7 +21,9 @@
    [metabase.util.json :as json]
    [metabase.util.performance :refer [mapv some]])
   (:import
-   (java.io OutputStream)
+   (java.awt Color Font Graphics2D RenderingHints)
+   (java.awt.image BufferedImage)
+   (java.io ByteArrayInputStream ByteArrayOutputStream OutputStream)
    (java.time
     LocalDate
     LocalDateTime
@@ -30,6 +32,7 @@
     OffsetTime
     ZonedDateTime)
    (java.util UUID)
+   (javax.imageio ImageIO)
    (org.apache.poi.ss.usermodel
     Cell
     DataConsolidateFunction
@@ -38,7 +41,7 @@
     Workbook)
    (org.apache.poi.ss.util CellRangeAddress)
    (org.apache.poi.xssf.streaming SXSSFRow SXSSFSheet SXSSFWorkbook)
-   (org.apache.poi.xssf.usermodel XSSFRow XSSFSheet)))
+   (org.apache.poi.xssf.usermodel XSSFRow XSSFSheet XSSFWorkbook)))
 
 (set! *warn-on-reflection* true)
 
@@ -597,29 +600,32 @@
      (.setAutoFilter ^SXSSFSheet sheet (new CellRangeAddress start-row start-row 0 (dec col-count)))
      (.createFreezePane ^SXSSFSheet sheet 0 (inc start-row)))))
 
-(def WATERMARK_ROW_COUNT
-  "Number of rows used for watermark at the top of the sheet."
-  2)
+(def ^:private watermark-tile-width  400)
+(def ^:private watermark-tile-height 200)
 
-(defn- add-watermark-rows!
-  "Writes watermark rows (exporter + timestamp) at row 0 and row 1 of the sheet."
-  [^SXSSFSheet sheet ^String common-name ^String email]
-  (let [export-time (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))
-        workbook    (.getWorkbook sheet)
-        font        (doto (.createFont workbook)
-                       (.setItalic true)
-                       (.setColor (.getIndex org.apache.poi.ss.usermodel.IndexedColors/GREY_40_PERCENT))
-                       (.setFontHeightInPoints (short 12)))
-        style       (doto (.createCellStyle workbook)
-                       (.setFont font))
-        info-row    (.createRow sheet 0)
-        time-row    (.createRow sheet 1)]
-    (.createCell info-row 0)
-    (.setCellValue (.getCell info-row 0) (str "Exported by: " common-name " (" email ")"))
-    (.setCellStyle (.getCell info-row 0) style)
-    (.createCell time-row 0)
-    (.setCellValue (.getCell time-row 0) (str "Export time: " export-time))
-    (.setCellStyle (.getCell time-row 0) style)))
+(defn- generate-watermark-image
+  "Creates a BufferedImage with diagonal watermark text, suitable for tiling as Excel
+  sheet background."
+  ^BufferedImage [^String text]
+  (let [img (BufferedImage. watermark-tile-width watermark-tile-height BufferedImage/TYPE_INT_ARGB)
+        g   (.createGraphics img)]
+    (.setRenderingHint g RenderingHints/KEY_ANTIALIASING RenderingHints/VALUE_ANTIALIAS_ON)
+    (.setRenderingHint g RenderingHints/KEY_TEXT_ANTIALIASING RenderingHints/VALUE_TEXT_ANTIALIAS_ON)
+    (.setFont g (Font. "SansSerif" Font/PLAIN 24))
+    (.setColor g (Color. 0x94 0x9a 0xab 38))  ;; #949aab with ~15% alpha
+    (let [fm          (.getFontMetrics g)
+          text-width  (.stringWidth fm text)
+          ;; Rotate -45 degrees around center of tile
+          cx          (/ watermark-tile-width 2.0)
+          cy          (/ watermark-tile-height 2.0)
+          orig-transform (.getTransform g)]
+      (.rotate g (Math/toRadians -45.0) cx cy)
+      (.drawString g text
+                   (- cx (/ text-width 2.0))
+                   cy)
+      (.setTransform g orig-transform))
+    (.dispose g)
+    img))
 
 ;; Possible Functions: https://poi.apache.org/apidocs/dev/org/apache/poi/ss/usermodel/DataConsolidateFunction.html
 ;; I'm only including the keys that seem to work for our Pivot Tables as of 2024-06-06
@@ -703,8 +709,7 @@
         pivot-data           (volatile! nil)
         pivot-grouping-index (volatile! nil)
         user-common-name     (volatile! nil)
-        user-email           (volatile! nil)
-        row-offset           (volatile! 0)]
+        user-email           (volatile! nil)]
     (reify qp.si/StreamingResultsWriter
       (begin! [_ {{:keys [ordered-cols results_timezone format-rows? pivot? pivot-export-options]
                    :or   {format-rows? true
@@ -731,17 +736,10 @@
                       :timezone             results_timezone
                       :format-rows?         format-rows?
                       :pivot-export-options pivot-export-options})
-            ;; Non-pivot: create sheet with watermark rows at top (before header)
-            (let [sheet       (spreadsheet/add-sheet! workbook (tru "Query result"))
-                  offset      (if @user-common-name
-                                (do (add-watermark-rows! sheet @user-common-name @user-email)
-                                    WATERMARK_ROW_COUNT)
-                                0)
-                  col-count   (count non-pivot-cols)]
-              (vreset! row-offset offset)
-              (track-n-cols-for-autosizing! col-count sheet)
-              (setup-header-row! sheet col-count offset)
-              (spreadsheet/add-row! sheet (streaming.common/column-titles non-pivot-cols (or viz-settings {}) format-rows?))
+            (let [sheet (init-workbook {:workbook     workbook
+                                        :ordered-cols non-pivot-cols
+                                        :viz-settings viz-settings
+                                        :format-rows? true})]
               (set-no-style-custom-helper! sheet)
               (vreset! styles (generate-styles workbook viz-settings non-pivot-cols format-rows?))
               (vreset! workbook-sheet sheet)))))
@@ -759,10 +757,9 @@
             (vswap! pivot-data update-in [:data :rows] conj! ordered-row)
             (when (or (not group)
                       (= qp.pivot.postprocess/non-pivot-row-group (int group)))
-              (let [row-pos (+ (inc row-num) @row-offset)
-                    {:keys [cell-styles typed-cell-styles]} @styles]
-                (add-row! @workbook-sheet row-pos row' ordered-cols' viz-settings cell-styles typed-cell-styles)
-                (when (= row-pos (+ @row-offset *auto-sizing-threshold*))
+              (let [{:keys [cell-styles typed-cell-styles]} @styles]
+                (add-row! @workbook-sheet (inc row-num) row' ordered-cols' viz-settings cell-styles typed-cell-styles)
+                (when (= (inc row-num) *auto-sizing-threshold*)
                   (autosize-columns! @workbook-sheet)))))))
 
       (finish! [_ {:keys [row_count]}]
@@ -793,15 +790,28 @@
                   (< row_count *auto-sizing-threshold*)
                   @pivot-data)
           (autosize-columns! @workbook-sheet))
-        ;; Set header/footer for print layout visibility
-        (when-let [sheet @workbook-sheet]
-          (when-let [cn @user-common-name]
-            (let [export-time (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))
-                  header-text (str "Exported by: " cn " (" (or @user-email "") ") - " export-time)]
-              (doto (.getHeader sheet)
-                (.setCenter header-text)))))
-        (try
-          (spreadsheet/save-workbook-into-stream! os workbook)
-          (finally
-            (.dispose ^SXSSFWorkbook workbook)
-            (.close os)))))))
+        ;; Save SXSSFWorkbook to buffer; if user is logged in, re-open as XSSFWorkbook
+        ;; to inject background watermark image, then write to HTTP response stream.
+        (let [baos (ByteArrayOutputStream.)]
+          (try
+            (spreadsheet/save-workbook-into-stream! baos workbook)
+            (finally
+              (.dispose ^SXSSFWorkbook workbook)))
+          (let [buf-bytes (.toByteArray baos)]
+            (if-let [cn @user-common-name]
+              ;; User is logged in — inject background watermark image via XSSFWorkbook
+              (with-open [xssf-wb (XSSFWorkbook. (ByteArrayInputStream. buf-bytes))]
+                (let [export-time (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))
+                      wm-text     (str cn " (" (or @user-email "") ") - " export-time)
+                      wm-img      (generate-watermark-image wm-text)
+                      img-baos    (ByteArrayOutputStream.)]
+                  (ImageIO/write wm-img "png" img-baos)
+                  (let [img-bytes (.toByteArray img-baos)]
+                    (.addPicture xssf-wb img-bytes Workbook/PICTURE_TYPE_PNG)
+                    ;; The picture we just added is the last one in the list
+                    (when-let [pic-data (last (.getAllPictures xssf-wb))]
+                      (doseq [^XSSFSheet s (.getSheets xssf-wb)]
+                        (.setBackgroundImage s pic-data)))))
+                (.write xssf-wb os))
+              ;; No user — write buffer bytes directly to output stream
+              (.write os buf-bytes))))))))
