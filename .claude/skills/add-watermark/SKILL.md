@@ -488,7 +488,7 @@ ns 声明添加依赖：
     (.setRenderingHint g RenderingHints/KEY_ANTIALIASING RenderingHints/VALUE_ANTIALIAS_ON)
     (.setRenderingHint g RenderingHints/KEY_TEXT_ANTIALIASING RenderingHints/VALUE_TEXT_ANTIALIAS_ON)
     (.setFont g (Font. "SansSerif" Font/PLAIN 24))
-    (.setColor g (Color. 0x94 0x9a 0xab 102))  ;; #949aab 透明度 ~40%
+    (.setColor g (Color. 0x94 0x9a 0xab 77))  ;; #949aab 透明度 ~30%
     (let [fm          (.getFontMetrics g)
           text-width  (.stringWidth fm text)
           cx          (/ watermark-tile-width 2.0)
@@ -569,8 +569,8 @@ ns 声明添加依赖：
 |------|------------------|-------------|
 | 字号 | 16px | 24px |
 | Tile 尺寸 | 220 × 220 | 220 × 220 |
-| 颜色 | `--mb-color-text-secondary` (#949aab) | #949aab alpha 102/255 (40%) |
-| 透明度 | 0.15 | 40% |
+| 颜色 | `--mb-color-text-secondary` (#949aab) | #949aab alpha 77/255 (30%) |
+| 透明度 | 0.15 | 30% |
 | 字体粗细 | 600 | PLAIN |
 | 旋转角度 | -45° | -45° |
 | 日期格式 | `yyyy-MM-dd HH:mm` | `yyyy-MM-dd HH:mm` |

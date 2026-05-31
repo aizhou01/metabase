@@ -1279,7 +1279,7 @@
     ;; to 100
      GET /api/dashboard/1/params/abc/search/Cam?def=100
 
-  Currently limited to first 1000 results."
+  Currently limited to first 3000 results."
   [{:keys [id param-key query]} :- [:map
                                     [:id    ms/PositiveInt]
                                     [:param-key ms/NonBlankString]

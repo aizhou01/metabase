@@ -410,7 +410,7 @@
    ;; return at most the lesser of `limit` (if specified) and `max-results`.
    [:limit {:optional true} [:maybe ms/PositiveInt]]])
 
-(def ^:private max-results 1000)
+(def ^:private max-results 3000)
 
 (mu/defn- chain-filter-mbql-query :- ::lib.schema/query
   "Generate the MBQL query powering `chain-filter`."

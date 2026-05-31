@@ -17,7 +17,7 @@
 
 (def ^:const result-limit
   "How many results to return when chain filtering"
-  1000)
+  3000)
 
 (defn- param-type->op [type]
   (if (get-in lib.schema.parameter/types [type :operator])

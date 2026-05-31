@@ -35,7 +35,7 @@
     (t2/select-one :model/Field :id fk-target-field-id)
     field))
 
-(def ^:private default-max-field-search-limit 1000)
+(def ^:private default-max-field-search-limit 3000)
 
 (mu/defn search-values :- [:maybe ms/FieldValuesList]
   "Search for values of `search-field` that contain `value` (up to `limit`, if specified), and return pairs like
