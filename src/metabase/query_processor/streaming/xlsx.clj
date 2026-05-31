@@ -611,7 +611,7 @@
     (.setRenderingHint g RenderingHints/KEY_ANTIALIASING RenderingHints/VALUE_ANTIALIAS_ON)
     (.setRenderingHint g RenderingHints/KEY_TEXT_ANTIALIASING RenderingHints/VALUE_TEXT_ANTIALIAS_ON)
     (.setFont g (Font. "SansSerif" Font/PLAIN 16))
-    (.setColor g (Color. 0x94 0x9a 0xab 38))  ;; #949aab with ~15% alpha
+    (.setColor g (Color. 0x94 0x9a 0xab 64))  ;; #949aab with ~25% alpha
     (let [fm          (.getFontMetrics g)
           text-width  (.stringWidth fm text)
           cx          (/ watermark-tile-width 2.0)
