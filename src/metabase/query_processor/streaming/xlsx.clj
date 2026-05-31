@@ -42,8 +42,7 @@
    (org.apache.poi.ss.util CellRangeAddress)
    (org.apache.poi.openxml4j.opc TargetMode)
    (org.apache.poi.xssf.streaming SXSSFRow SXSSFSheet SXSSFWorkbook)
-   (org.apache.poi.xssf.usermodel XSSFRow XSSFRelation XSSFSheet XSSFWorkbook)
-   (java.util.zip ZipEntry ZipInputStream ZipOutputStream)))
+   (org.apache.poi.xssf.usermodel XSSFRow XSSFRelation XSSFSheet XSSFWorkbook)))
 
 (set! *warn-on-reflection* true)
 
@@ -600,8 +599,8 @@
     (.setAutoFilter ^SXSSFSheet sheet (new CellRangeAddress 0 0 0 (dec col-count)))
     (.createFreezePane ^SXSSFSheet sheet 0 1)))
 
-(def ^:private watermark-tile-width  400)
-(def ^:private watermark-tile-height 200)
+(def ^:private watermark-tile-width  220)
+(def ^:private watermark-tile-height 220)
 
 (defn- generate-watermark-image
   "Creates a BufferedImage with diagonal watermark text, suitable for tiling as Excel
@@ -611,11 +610,10 @@
         g   (.createGraphics img)]
     (.setRenderingHint g RenderingHints/KEY_ANTIALIASING RenderingHints/VALUE_ANTIALIAS_ON)
     (.setRenderingHint g RenderingHints/KEY_TEXT_ANTIALIASING RenderingHints/VALUE_TEXT_ANTIALIAS_ON)
-    (.setFont g (Font. "SansSerif" Font/PLAIN 24))
+    (.setFont g (Font. "SansSerif" Font/PLAIN 16))
     (.setColor g (Color. 0x94 0x9a 0xab 38))  ;; #949aab with ~15% alpha
     (let [fm          (.getFontMetrics g)
           text-width  (.stringWidth fm text)
-          ;; Rotate -45 degrees around center of tile
           cx          (/ watermark-tile-width 2.0)
           cy          (/ watermark-tile-height 2.0)
           orig-transform (.getTransform g)]
@@ -626,101 +624,6 @@
       (.setTransform g orig-transform))
     (.dispose g)
     img))
-
-(defn- zis->bytes
-  "Read all bytes from the current ZipInputStream entry."
-  [^ZipInputStream zis]
-  (let [baos (ByteArrayOutputStream.)
-        buf  (byte-array 4096)]
-    (loop [n (.read zis buf)]
-      (when (pos? n)
-        (.write baos buf 0 n)
-        (recur (.read zis buf))))
-    (.toByteArray baos)))
-
-(defn- inject-picture-element
-  "Insert <picture r:id=\"rIdWm\"/> after the <sheetPr> element in sheet XML.
-  Handles both self-closing <sheetPr/> and explicit <sheetPr>...</sheetPr>."
-  [^bytes sheet-xml]
-  (let [s (String. sheet-xml "UTF-8")]
-    (if-let [idx (str/index-of s "<sheetPr")]
-      (let [;; Find the position right after <sheetPr> tag
-            close-gt   (str/index-of s ">" idx)
-            slash      (str/index-of s "/>" idx)
-            self-close (and slash (or (neg? close-gt) (< slash (inc close-gt))))
-            insert-pos (if self-close
-                        (+ slash 2)         ;; after "/>"
-                        (let [end-tag (str/index-of s "</sheetPr>" idx)]
-                          (if end-tag
-                            (+ end-tag 9)   ;; after "</sheetPr>"
-                            (inc close-gt))))]  ;; fallback: after ">"
-        (if (pos? insert-pos)
-          (let [before (subs s 0 insert-pos)
-                after  (subs s insert-pos)]
-            (.getBytes (str before "<picture r:id=\"rIdWm\"/>" after) "UTF-8"))
-          sheet-xml))
-      sheet-xml)))
-
-(defn- inject-rels-entry
-  "Insert a relationship entry for the background image before </Relationships> in .rels."
-  [^bytes rels-xml _img-path]
-  (let [s         (String. rels-xml "UTF-8")
-        rel-entry (str "<Relationship Id=\"rIdWm\" "
-                       "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" "
-                       "Target=\"../media/watermark.png\"/>")]
-    (if-let [end-tag (str/last-index-of s "</Relationships>")]
-      (let [before (subs s 0 end-tag)
-            after  (subs s end-tag)]
-        (.getBytes (str before rel-entry after) "UTF-8"))
-      rels-xml)))
-
-(defn- inject-background-image
-  "Takes an XLSX byte array and a watermark PNG byte array, returns a new XLSX byte
-  array with the watermark image set as the sheet background via ZIP-level manipulation."
-  [^bytes xlsx-bytes ^bytes png-bytes]
-  (let [img-entry-name "xl/media/watermark.png"
-        zout           (ByteArrayOutputStream.)
-        zos            (ZipOutputStream. zout)
-        modified       (volatile! false)]
-    ;; Phase 1: copy original entries, collect sheet & rels XML for modification
-    (with-open [zis (ZipInputStream. (ByteArrayInputStream. xlsx-bytes))]
-      (loop [entry (.getNextEntry zis)]
-        (when entry
-          (let [name     (.getName entry)
-                content  (zis->bytes zis)
-                ;; Fix sheet XML: insert <picture> after <sheetPr>
-                new-name (if (and (.startsWith name "xl/worksheets/sheet")
-                                  (.endsWith name ".xml")
-                                  (not (.contains name "_rels")))
-                          (do
-                            (.putNextEntry zos (ZipEntry. name))
-                            (.write zos (inject-picture-element content))
-                            (.closeEntry zos)
-                            (vreset! modified true)
-                            ::done)
-                          nil)
-                ;; Fix sheet rels: add background image relationship
-                new-rels (if (and (.startsWith name "xl/worksheets/_rels/sheet")
-                                  (.endsWith name ".xml.rels"))
-                          (do
-                            (.putNextEntry zos (ZipEntry. name))
-                            (.write zos (inject-rels-entry content img-entry-name))
-                            (.closeEntry zos)
-                            ::done)
-                          nil)]
-            (when-not (identical? ::done new-name)
-              (when-not (identical? ::done new-rels)
-                ;; Copy original entry unchanged
-                (.putNextEntry zos (ZipEntry. name))
-                (.write zos content)
-                (.closeEntry zos)))
-            (recur (.getNextEntry zis)))))
-      ;; Phase 2: add the watermark image
-      (.putNextEntry zos (ZipEntry. img-entry-name))
-      (.write zos png-bytes)
-      (.closeEntry zos)
-      (.close zos)
-      (.toByteArray zout))))
 
 ;; Possible Functions: https://poi.apache.org/apidocs/dev/org/apache/poi/ss/usermodel/DataConsolidateFunction.html
 ;; I'm only including the keys that seem to work for our Pivot Tables as of 2024-06-06
@@ -884,22 +787,32 @@
                   (< row_count *auto-sizing-threshold*)
                   @pivot-data)
           (autosize-columns! @workbook-sheet))
-        ;; If user is logged in, save SXSSF to buffer, generate watermark PNG,
-        ;; inject it as sheet background via ZIP-level manipulation, and write result.
+        ;; If user is logged in, save to buffer, reload as XSSFWorkbook to inject
+        ;; background watermark image via OOXML API, then write to output stream.
         ;; Otherwise, write directly to the output stream (original fast path).
         (if-let [cn @user-common-name]
-          (let [baos       (ByteArrayOutputStream.)]
+          (let [baos (ByteArrayOutputStream.)]
             (spreadsheet/save-workbook-into-stream! baos workbook)
             (.dispose ^SXSSFWorkbook workbook)
-            (let [xlsx-bytes    (.toByteArray baos)
-                  export-time   (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))
-                  wm-text       (str cn " (" (or @user-email "") ") - " export-time)
-                  wm-img        (generate-watermark-image wm-text)
-                  img-baos      (ByteArrayOutputStream.)
-                  _             (ImageIO/write wm-img "png" img-baos)
-                  png-bytes     (.toByteArray img-baos)
-                  result-bytes  (inject-background-image xlsx-bytes png-bytes)]
-              (.write os result-bytes)))
+            (let [buf-bytes (.toByteArray baos)]
+              (org.apache.poi.util.IOUtils/setByteArrayMaxOverride -1)
+              (with-open [xssf-wb (XSSFWorkbook. (ByteArrayInputStream. buf-bytes))]
+                (let [export-time (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))
+                      wm-text     (str cn " - " export-time)
+                      wm-img      (generate-watermark-image wm-text)
+                      img-baos    (ByteArrayOutputStream.)]
+                  (ImageIO/write wm-img "png" img-baos)
+                  (let [img-bytes (.toByteArray img-baos)]
+                    (.addPicture xssf-wb img-bytes Workbook/PICTURE_TYPE_PNG)
+                    (when-let [pic-part (last (.getAllPictures xssf-wb))]
+                      (let [ppn      (.getPartName (.getPackagePart pic-part))
+                            rel-type (.getRelation XSSFRelation/IMAGES)]
+                        (dotimes [i (.getNumberOfSheets xssf-wb)]
+                          (let [^XSSFSheet sheet (.getSheetAt xssf-wb i)
+                                pr (.addRelationship (.getPackagePart sheet) ppn
+                                                     TargetMode/INTERNAL rel-type nil)]
+                            (.setId (.addNewPicture (.getCTWorksheet sheet)) (.getId pr))))))))
+                (.write xssf-wb os))))
           ;; No user — original save path (known to work)
           (try
             (spreadsheet/save-workbook-into-stream! os workbook)
