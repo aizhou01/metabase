@@ -2,9 +2,7 @@
   (:refer-clojure :exclude [mapv])
   (:require
    [clojure.data.csv]
-   [java-time.api :as t]
    [medley.core :as m]
-   [metabase.api.common :as api]
    [metabase.formatter.core :as formatter]
    [metabase.pivot.core :as pivot]
    [metabase.query-processor.pivot.postprocess :as qp.pivot.postprocess]
@@ -113,15 +111,6 @@
             (vreset! pivot-data {:pivot-grouping-index pivot-grouping-index}))
           (vreset! ordered-formatters
                    (mapv #(formatter/create-formatter results_timezone % viz-settings format-rows?) ordered-cols))
-          ;; Write watermark comment rows for authenticated users
-          (when api/*current-user-id*
-            (let [user         @api/*current-user*
-                  common-name  (str (:last_name user) (:first_name user))
-                  email        (:email user)
-                  export-time  (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))]
-              (when common-name
-                (write-csv writer [[(str "# Exported by: " common-name " (" email ")")]])
-                (write-csv writer [[(str "# Export time: " export-time)]]))))
           ;; Write the column names for non-pivot tables
           (when (or (not pivot?) (not enable-pivoted-exports?))
             (let [header (m/remove-nth (or pivot-grouping-index (inc (count col-names))) col-names)]

@@ -9,8 +9,7 @@
 2. **PDF 导出**：看板 PDF 下载
 3. **PNG 导出**：图表/可视化图片下载
 4. **Excel 导出**：XLSX 下载（背景图片水印）
-5. **CSV 导出**：CSV 下载（注释行水印）
-6. **导出格式限制**：下载下拉菜单只保留 XLSX
+5. **导出格式限制**：下载下拉菜单只保留 XLSX
 
 ---
 
@@ -430,32 +429,7 @@ if (userName) {
 
 ---
 
-### 8. `src/metabase/query_processor/streaming/csv.clj`
-
-ns 声明添加依赖：
-
-```clojure
-[java-time.api :as t]
-[metabase.api.common :as api]
-```
-
-在 `begin!` 方法中，列名写入之前添加水印注释行：
-
-```clojure
-;; 为已登录用户写入水印注释行
-(when api/*current-user-id*
-  (let [user         @api/*current-user*
-        common-name  (str (:last_name user) (:first_name user))
-        email        (:email user)
-        export-time  (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))]
-    (when common-name
-      (write-csv writer [[(str "# Exported by: " common-name " (" email ")")]])
-      (write-csv writer [[(str "# Export time: " export-time)]]))))
-```
-
----
-
-### 9. `src/metabase/query_processor/streaming/xlsx.clj`
+### 8. `src/metabase/query_processor/streaming/xlsx.clj`
 
 **a) ns 声明添加 require：**
 
