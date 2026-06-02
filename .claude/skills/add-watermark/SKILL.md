@@ -509,7 +509,7 @@ if (userName) {
     (spreadsheet/save-workbook-into-stream! baos workbook)
     (.dispose ^SXSSFWorkbook workbook)
     (let [buf-bytes (.toByteArray baos)]
-      (org.apache.poi.util.IOUtils/setByteArrayMaxOverride -1)
+      (org.apache.poi.util.IOUtils/setByteArrayMaxOverride Integer/MAX_VALUE)
       (with-open [xssf-wb (XSSFWorkbook. (ByteArrayInputStream. buf-bytes))]
         (let [export-time (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))
               wm-text     (str cn " - " export-time)
