@@ -791,12 +791,12 @@
         ;; background watermark image via OOXML API, then write to output stream.
         ;; Otherwise, write directly to the output stream (original fast path).
         (if-let [cn @user-common-name]
-          (let [baos (ByteArrayOutputStream.)]
-            (spreadsheet/save-workbook-into-stream! baos workbook)
-            (.dispose ^SXSSFWorkbook workbook)
-            (let [buf-bytes (.toByteArray baos)]
-              (org.apache.poi.util.IOUtils/setByteArrayMaxOverride Integer/MAX_VALUE)
-              (with-open [xssf-wb (XSSFWorkbook. (ByteArrayInputStream. buf-bytes))]
+          (let [tmp-file (java.io.File/createTempFile "mb-xlsx-" ".tmp")]
+            (try
+              (with-open [fos (java.io.FileOutputStream. tmp-file)]
+                (spreadsheet/save-workbook-into-stream! fos workbook))
+              (.dispose ^SXSSFWorkbook workbook)
+              (with-open [xssf-wb (XSSFWorkbook. tmp-file)]
                 (let [export-time (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))
                       wm-text     (str cn " - " export-time)
                       wm-img      (generate-watermark-image wm-text)
@@ -812,7 +812,9 @@
                                 pr (.addRelationship (.getPackagePart sheet) ppn
                                                      TargetMode/INTERNAL rel-type nil)]
                             (.setId (.addNewPicture (.getCTWorksheet sheet)) (.getId pr))))))))
-                (.write xssf-wb os))))
+                (.write xssf-wb os))
+              (finally
+                (.delete tmp-file))))
           ;; No user — original save path (known to work)
           (try
             (spreadsheet/save-workbook-into-stream! os workbook)
