@@ -5,7 +5,6 @@
    [dk.ative.docjure.spreadsheet :as spreadsheet] ; codespell:ignore ative
    [java-time.api :as t]
    [medley.core :as m]
-   [metabase.api.common :as api]
    [metabase.formatter.core :as formatter]
    [metabase.lib.schema.temporal-bucketing :as lib.schema.temporal-bucketing]
    [metabase.models.visualization-settings :as mb.viz]
@@ -21,9 +20,7 @@
    [metabase.util.json :as json]
    [metabase.util.performance :refer [mapv some]])
   (:import
-   (java.awt Color Font Graphics2D RenderingHints)
-   (java.awt.image BufferedImage)
-   (java.io ByteArrayOutputStream OutputStream)
+   (java.io OutputStream)
    (java.time
     LocalDate
     LocalDateTime
@@ -32,8 +29,6 @@
     OffsetTime
     ZonedDateTime)
    (java.util UUID)
-   (java.util.zip ZipEntry ZipOutputStream)
-   (javax.imageio ImageIO)
    (org.apache.poi.ss.usermodel
     Cell
     DataConsolidateFunction
@@ -599,113 +594,6 @@
     (.setAutoFilter ^SXSSFSheet sheet (new CellRangeAddress 0 0 0 (dec col-count)))
     (.createFreezePane ^SXSSFSheet sheet 0 1)))
 
-(def ^:private watermark-tile-width  220)
-(def ^:private watermark-tile-height 220)
-
-(defn- generate-watermark-image
-  "Creates a BufferedImage with diagonal watermark text, suitable for tiling as Excel
-  sheet background."
-  ^BufferedImage [^String text]
-  (let [img (BufferedImage. watermark-tile-width watermark-tile-height BufferedImage/TYPE_INT_ARGB)
-        g   (.createGraphics img)]
-    (.setRenderingHint g RenderingHints/KEY_ANTIALIASING RenderingHints/VALUE_ANTIALIAS_ON)
-    (.setRenderingHint g RenderingHints/KEY_TEXT_ANTIALIASING RenderingHints/VALUE_TEXT_ANTIALIAS_ON)
-    (.setFont g (Font. "SansSerif" Font/PLAIN 24))
-    (.setColor g (Color. 0x94 0x9a 0xab 77))  ;; #949aab with ~30% alpha
-    (let [fm          (.getFontMetrics g)
-          text-width  (.stringWidth fm text)
-          cx          (/ watermark-tile-width 2.0)
-          cy          (/ watermark-tile-height 2.0)
-          orig-transform (.getTransform g)]
-      (.rotate g (Math/toRadians -45.0) cx cy)
-      (.drawString g text
-                   (- cx (/ text-width 2.0))
-                   cy)
-      (.setTransform g orig-transform))
-    (.dispose g)
-    img))
-
-(defn- inject-picture-element
-  "Insert <picture r:id=\"rIdWm\"/> after <sheetPr> in a sheet XML byte array."
-  [^bytes sheet-xml]
-  (let [s (String. sheet-xml "UTF-8")]
-    (if-let [idx (str/index-of s "<sheetPr")]
-      (let [slash      (str/index-of s "/>" idx)
-            close-gt   (str/index-of s ">" idx)
-            self-close (and slash (pos? slash) (or (neg? close-gt) (< slash close-gt)))
-            insert-pos (if self-close
-                         (+ slash 2)
-                         (let [end-tag (str/index-of s "</sheetPr>" idx)]
-                           (if end-tag (+ end-tag 9) (inc close-gt))))]
-        (if (pos? insert-pos)
-          (.getBytes (str (subs s 0 insert-pos) "<picture r:id=\"rIdWm\"/>"
-                          (subs s insert-pos)) "UTF-8")
-          sheet-xml))
-      sheet-xml)))
-
-(defn- inject-rels-entry
-  "Insert a relationship entry for the background image before </Relationships>."
-  [^bytes rels-xml]
-  (let [s         (String. rels-xml "UTF-8")
-        rel-entry (str "<Relationship Id=\"rIdWm\" "
-                       "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" "
-                       "Target=\"../media/watermark.png\"/>")]
-    (if-let [end-tag (str/last-index-of s "</Relationships>")]
-      (.getBytes (str (subs s 0 end-tag) rel-entry (subs s end-tag)) "UTF-8")
-      rels-xml)))
-
-(defn- inject-background-image
-  "Stream-write an XLSX file with background watermark injected, directly to the
-  given OutputStream.  Uses ZipFile for reliable reading of all entry sizes."
-  [^java.io.File xlsx-file ^bytes png-bytes ^OutputStream out]
-  (let [zos (ZipOutputStream. out)]
-    (with-open [zf (java.util.zip.ZipFile. xlsx-file)]
-      (doseq [^ZipEntry entry (enumeration-seq (.entries zf))]
-        (let [name (.getName entry)]
-          (if (and (.startsWith name "xl/worksheets/sheet")
-                   (.endsWith name ".xml")
-                   (not (.contains name "_rels")))
-            ;; sheet XML: buffer, inject <picture>, write
-            (let [content (with-open [is (.getInputStream zf entry)]
-                            (let [baos (ByteArrayOutputStream.)
-                                  buf  (byte-array 4096)]
-                              (loop [n (.read is buf)]
-                                (when (pos? n)
-                                  (.write baos buf 0 n)
-                                  (recur (.read is buf))))
-                              (.toByteArray baos)))]
-              (.putNextEntry zos (ZipEntry. name))
-              (.write zos (inject-picture-element content))
-              (.closeEntry zos))
-            (if (and (.startsWith name "xl/worksheets/_rels/sheet")
-                     (.endsWith name ".xml.rels"))
-              ;; sheet rels: buffer, inject relationship, write
-              (let [content (with-open [is (.getInputStream zf entry)]
-                              (let [baos (ByteArrayOutputStream.)
-                                    buf  (byte-array 4096)]
-                                (loop [n (.read is buf)]
-                                  (when (pos? n)
-                                    (.write baos buf 0 n)
-                                    (recur (.read is buf))))
-                                (.toByteArray baos)))]
-                (.putNextEntry zos (ZipEntry. name))
-                (.write zos (inject-rels-entry content))
-                (.closeEntry zos))
-              ;; all other entries: stream directly without buffering
-              (do (.putNextEntry zos (ZipEntry. name))
-                  (with-open [is (.getInputStream zf entry)]
-                    (let [buf (byte-array 4096)]
-                      (loop [n (.read is buf)]
-                        (when (pos? n)
-                          (.write zos buf 0 n)
-                          (recur (.read is buf))))))
-                  (.closeEntry zos)))))))
-    ;; Add watermark image
-    (.putNextEntry zos (ZipEntry. "xl/media/watermark.png"))
-    (.write zos png-bytes)
-    (.closeEntry zos)
-    (.close zos)))
-
 ;; Possible Functions: https://poi.apache.org/apidocs/dev/org/apache/poi/ss/usermodel/DataConsolidateFunction.html
 ;; I'm only including the keys that seem to work for our Pivot Tables as of 2024-06-06
 (defn- col->aggregation-fn
@@ -786,19 +674,12 @@
         workbook-sheet       (volatile! nil)
         styles               (volatile! nil)
         pivot-data           (volatile! nil)
-        pivot-grouping-index (volatile! nil)
-        user-common-name     (volatile! nil)
-        user-email           (volatile! nil)]
+        pivot-grouping-index (volatile! nil)]
     (reify qp.si/StreamingResultsWriter
       (begin! [_ {{:keys [ordered-cols results_timezone format-rows? pivot? pivot-export-options]
                    :or   {format-rows? true
                           pivot?       false}} :data}
                viz-settings]
-        ;; Capture user info on the handler thread before QP threads take over
-        (when api/*current-user-id*
-          (when-let [user @api/*current-user*]
-            (vreset! user-common-name (str (:last_name user) (:first_name user)))
-            (vreset! user-email (:email user))))
         (let [pivot-spec       (when (and pivot? pivot-export-options (qp.settings/enable-pivoted-exports))
                                  (pivot-opts->pivot-spec (merge {:pivot-cols []
                                                                  :pivot-rows []}
@@ -806,6 +687,7 @@
               non-pivot-cols (pivot/columns-without-pivot-group ordered-cols)]
           (vreset! pivot-grouping-index (qp.pivot.postprocess/pivot-grouping-index (mapv :display_name ordered-cols)))
           (if pivot-spec
+            ;; If we're generating a pivot table, just initialize the `pivot-data` volatile but not the workbook, yet
             (vreset! pivot-data
                      {:settings             viz-settings
                       :non-pivot-cols       non-pivot-cols
@@ -830,6 +712,9 @@
               group                (get row @pivot-grouping-index)
               [row' ordered-cols'] (cond->> [ordered-row ordered-cols]
                                      @pivot-grouping-index
+                                     ;; We need to remove the pivot-grouping key if it's there, because we don't show
+                                     ;; it in the export. `ordered-cols` is a parallel array, so we must remove the
+                                     ;; corresponding col.
                                      (map #(m/remove-nth @pivot-grouping-index %)))]
           (if @pivot-data
             (vswap! pivot-data update-in [:data :rows] conj! ordered-row)
@@ -842,10 +727,14 @@
 
       (finish! [_ {:keys [row_count]}]
         (when @pivot-data
+          ;; For pivoted exports, we pivot in-memory (same as CSVs) and then write the results to the
+          ;; document all at once
           (let [{:keys [settings non-pivot-cols pivot-export-options timezone format-rows?]} @pivot-data
                 {:keys [pivot-rows pivot-cols pivot-measures]} pivot-export-options
+
                 {:keys [cell-styles typed-cell-styles]}
                 (generate-styles workbook settings non-pivot-cols format-rows?)
+
                 formatters (make-formatters cell-styles
                                             non-pivot-cols
                                             pivot-rows
@@ -867,27 +756,10 @@
         (when (or (nil? row_count)
                   (< row_count *auto-sizing-threshold*)
                   @pivot-data)
+          ;; Auto-size columns if we never hit the row threshold, or a final row count was not provided
           (autosize-columns! @workbook-sheet))
-        ;; If user is logged in, save SXSSF to buffer, inject watermark PNG
-        ;; directly into the XLSX ZIP structure, and write result to output.
-        ;; Otherwise, write directly to the output stream (original fast path).
-        (if-let [cn @user-common-name]
-          (let [tmp-file (java.io.File/createTempFile "mb-xlsx-" ".tmp")]
-            (try
-              (with-open [fos (java.io.FileOutputStream. tmp-file)]
-                (spreadsheet/save-workbook-into-stream! fos workbook))
-              (.dispose ^SXSSFWorkbook workbook)
-              (let [export-time (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))
-                    wm-text     (str cn " - " export-time)
-                    wm-img      (generate-watermark-image wm-text)
-                    img-baos    (ByteArrayOutputStream.)]
-                (ImageIO/write wm-img "png" img-baos)
-                (inject-background-image tmp-file (.toByteArray img-baos) os))
-              (finally
-                (.delete tmp-file))))
-          ;; No user — original save path (known to work)
-          (try
-            (spreadsheet/save-workbook-into-stream! os workbook)
-            (finally
-              (.dispose ^SXSSFWorkbook workbook)
-              (.close os))))))))
+        (try
+          (spreadsheet/save-workbook-into-stream! os workbook)
+          (finally
+            (.dispose ^SXSSFWorkbook workbook)
+            (.close os)))))))

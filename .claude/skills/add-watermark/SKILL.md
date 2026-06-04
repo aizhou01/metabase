@@ -8,8 +8,7 @@
 1. **屏幕显示**：问题视图、看板视图
 2. **PDF 导出**：看板 PDF 下载
 3. **PNG 导出**：图表/可视化图片下载
-4. **Excel 导出**：XLSX 下载（背景图片水印）
-5. **导出格式限制**：下载下拉菜单只保留 XLSX
+4. **导出格式限制**：下载下拉菜单只保留 XLSX
 
 ---
 
@@ -429,198 +428,20 @@ if (userName) {
 
 ---
 
-### 8. `src/metabase/query_processor/streaming/xlsx.clj`
-
-**a) ns 声明添加 require：**
-
-```clojure
-[metabase.api.common :as api]
-```
-
-**b) ns 声明添加 import：**
-
-```clojure
-(java.awt Color Font Graphics2D RenderingHints)
-(java.awt.image BufferedImage)
-(java.io ByteArrayOutputStream OutputStream)
-(java.util.zip ZipEntry ZipOutputStream)
-(javax.imageio ImageIO)
-```
-
-**c) 在 `setup-header-row!` 后面添加水印图片生成和 ZIP 注入函数：**
-
-```clojure
-(def ^:private watermark-tile-width  220)
-(def ^:private watermark-tile-height 220)
-
-(defn- generate-watermark-image
-  "生成带对角水印文字的 BufferedImage，用于 Excel 工作表背景平铺。"
-  ^BufferedImage [^String text]
-  (let [img (BufferedImage. watermark-tile-width watermark-tile-height BufferedImage/TYPE_INT_ARGB)
-        g   (.createGraphics img)]
-    (.setRenderingHint g RenderingHints/KEY_ANTIALIASING RenderingHints/VALUE_ANTIALIAS_ON)
-    (.setRenderingHint g RenderingHints/KEY_TEXT_ANTIALIASING RenderingHints/VALUE_TEXT_ANTIALIAS_ON)
-    (.setFont g (Font. "SansSerif" Font/PLAIN 24))
-    (.setColor g (Color. 0x94 0x9a 0xab 77))  ;; #949aab 透明度 ~30%
-    (let [fm          (.getFontMetrics g)
-          text-width  (.stringWidth fm text)
-          cx          (/ watermark-tile-width 2.0)
-          cy          (/ watermark-tile-height 2.0)
-          orig-transform (.getTransform g)]
-      (.rotate g (Math/toRadians -45.0) cx cy)
-      (.drawString g text
-                   (- cx (/ text-width 2.0))
-                   cy)
-      (.setTransform g orig-transform))
-    (.dispose g)
-    img))
-
-(defn- inject-picture-element
-  "在 sheet XML 的 <sheetPr> 后插入 <picture r:id=\"rIdWm\"/>。"
-  [^bytes sheet-xml]
-  (let [s (String. sheet-xml "UTF-8")]
-    (if-let [idx (str/index-of s "<sheetPr")]
-      (let [slash      (str/index-of s "/>" idx)
-            close-gt   (str/index-of s ">" idx)
-            self-close (and slash (pos? slash) (or (neg? close-gt) (< slash close-gt)))
-            insert-pos (if self-close
-                         (+ slash 2)
-                         (let [end-tag (str/index-of s "</sheetPr>" idx)]
-                           (if end-tag (+ end-tag 9) (inc close-gt))))]
-        (if (pos? insert-pos)
-          (.getBytes (str (subs s 0 insert-pos) "<picture r:id=\"rIdWm\"/>"
-                          (subs s insert-pos)) "UTF-8")
-          sheet-xml))
-      sheet-xml)))
-
-(defn- inject-rels-entry
-  "在 sheet .rels 文件的 </Relationships> 前插入水印图片关系。"
-  [^bytes rels-xml]
-  (let [s         (String. rels-xml "UTF-8")
-        rel-entry (str "<Relationship Id=\"rIdWm\" "
-                       "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" "
-                       "Target=\"../media/watermark.png\"/>")]
-    (if-let [end-tag (str/last-index-of s "</Relationships>")]
-      (.getBytes (str (subs s 0 end-tag) rel-entry (subs s end-tag)) "UTF-8")
-      rels-xml)))
-
-(defn- inject-background-image
-  "使用 ZipFile 读取 XLSX 临时文件，将水印 PNG 注入后直接流式写入 OutputStream。
-  XML 类 entry 缓冲后修改，其他 entry 直接流式复制（零缓冲）。"
-  [^java.io.File xlsx-file ^bytes png-bytes ^OutputStream out]
-  (let [zos (ZipOutputStream. out)]
-    (with-open [zf (java.util.zip.ZipFile. xlsx-file)]
-      (doseq [^ZipEntry entry (enumeration-seq (.entries zf))]
-        (let [name (.getName entry)]
-          (if (and (.startsWith name "xl/worksheets/sheet")
-                   (.endsWith name ".xml")
-                   (not (.contains name "_rels")))
-            ;; sheet XML: 缓冲后注入 <picture>
-            (let [content (with-open [is (.getInputStream zf entry)]
-                            (let [baos (ByteArrayOutputStream.)
-                                  buf  (byte-array 4096)]
-                              (loop [n (.read is buf)]
-                                (when (pos? n)
-                                  (.write baos buf 0 n)
-                                  (recur (.read is buf))))
-                              (.toByteArray baos)))]
-              (.putNextEntry zos (ZipEntry. name))
-              (.write zos (inject-picture-element content))
-              (.closeEntry zos))
-            (if (and (.startsWith name "xl/worksheets/_rels/sheet")
-                     (.endsWith name ".xml.rels"))
-              ;; sheet rels: 缓冲后注入关系
-              (let [content (with-open [is (.getInputStream zf entry)]
-                              (let [baos (ByteArrayOutputStream.)
-                                    buf  (byte-array 4096)]
-                                (loop [n (.read is buf)]
-                                  (when (pos? n)
-                                    (.write baos buf 0 n)
-                                    (recur (.read is buf))))
-                                (.toByteArray baos)))]
-                (.putNextEntry zos (ZipEntry. name))
-                (.write zos (inject-rels-entry content))
-                (.closeEntry zos))
-              ;; 其他 entry: 直接流式复制，零缓冲
-              (do (.putNextEntry zos (ZipEntry. name))
-                  (with-open [is (.getInputStream zf entry)]
-                    (let [buf (byte-array 4096)]
-                      (loop [n (.read is buf)]
-                        (when (pos? n)
-                          (.write zos buf 0 n)
-                          (recur (.read is buf))))))
-                  (.closeEntry zos)))))))
-    ;; 添加水印图片
-    (.putNextEntry zos (ZipEntry. "xl/media/watermark.png"))
-    (.write zos png-bytes)
-    (.closeEntry zos)
-    (.close zos)))
-```
-
-**d) `defmethod streaming-results-writer` 的 let 绑定中添加用户信息 volatiles：**
-
-```clojure
-(let [workbook             (SXSSFWorkbook.)
-      workbook-sheet       (volatile! nil)
-      styles               (volatile! nil)
-      pivot-data           (volatile! nil)
-      pivot-grouping-index (volatile! nil)
-      user-common-name     (volatile! nil)
-      user-email           (volatile! nil)]
-```
-
-**e) `begin!` 方法开头添加用户信息捕获（在 QP 线程接管之前）：**
-
-```clojure
-;; 在 handler 线程中捕获用户信息，防止 QP 线程池丢失上下文
-(when api/*current-user-id*
-  (when-let [user @api/*current-user*]
-    (vreset! user-common-name (str (:last_name user) (:first_name user)))
-    (vreset! user-email (:email user))))
-```
-
-**f) 替换 `finish!` 结尾的 `(try ...)` 块为流式 ZIP 注入逻辑：**
-
-```clojure
-;; 有用户：SXSSF → temp file → ZipFile 读取 → 注入水印 → 流式写 HTTP 响应
-;; 无用户：直接写到输出流（原始快速路径）
-(if-let [cn @user-common-name]
-  (let [tmp-file (java.io.File/createTempFile "mb-xlsx-" ".tmp")]
-    (try
-      (with-open [fos (java.io.FileOutputStream. tmp-file)]
-        (spreadsheet/save-workbook-into-stream! fos workbook))
-      (.dispose ^SXSSFWorkbook workbook)
-      (let [export-time (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))
-            wm-text     (str cn " - " export-time)
-            wm-img      (generate-watermark-image wm-text)
-            img-baos    (ByteArrayOutputStream.)]
-        (ImageIO/write wm-img "png" img-baos)
-        (inject-background-image tmp-file (.toByteArray img-baos) os))
-      (finally
-        (.delete tmp-file))))
-  ;; 无用户 — 原始保存路径
-  (try
-    (spreadsheet/save-workbook-into-stream! os workbook)
-    (finally
-      (.dispose ^SXSSFWorkbook workbook)
-      (.close os))))
-```
-
----
-
 ## 水印参数配置
 
-| 参数 | 屏幕 / PDF / PNG | Excel 背景图 |
-|------|------------------|-------------|
-| 字号 | 16px | 24px |
-| Tile 尺寸 | 220 × 220 | 220 × 220 |
-| 颜色 | `--mb-color-text-secondary` (#949aab) | #949aab alpha 77/255 (30%) |
-| 透明度 | 0.15 | 30% |
-| 字体粗细 | 600 | PLAIN |
-| 旋转角度 | -45° | -45° |
-| 日期格式 | `yyyy-MM-dd HH:mm` | `yyyy-MM-dd HH:mm` |
-| 姓名格式 | 姓 + 名（`last_name` + `first_name`） | 姓 + 名（`last_name` + `first_name`） |
-| 水印内容 | `姓名 - 日期 时间` | `姓名 - 日期 时间` |
+| 参数 | 屏幕 / PDF / PNG |
+|------|------------------|
+| 字号 | 16px |
+| Tile 尺寸 | 220 × 220 |
+| 颜色 | `--mb-color-text-secondary` (#949aab) |
+| 透明度 | 0.15 |
+| 字体粗细 | 600 |
+| 旋转角度 | -45° |
+| 日期格式 | `yyyy-MM-dd HH:mm` |
+| 姓名格式 | 姓 + 名（`last_name` + `first_name`） |
+| 水印内容 | `姓名 - 日期 时间` |
+| Excel 导出 | 无水印（使用官方原始导出） |
 
 ---
 
