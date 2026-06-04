@@ -442,13 +442,12 @@ if (userName) {
 ```clojure
 (java.awt Color Font Graphics2D RenderingHints)
 (java.awt.image BufferedImage)
-(java.io ByteArrayInputStream ByteArrayOutputStream OutputStream)
+(java.io ByteArrayOutputStream OutputStream)
+(java.util.zip ZipEntry ZipInputStream ZipOutputStream)
 (javax.imageio ImageIO)
-(org.apache.poi.openxml4j.opc TargetMode)
-(org.apache.poi.xssf.usermodel XSSFRelation XSSFWorkbook)
 ```
 
-**c) 在 `setup-header-row!` 后面添加水印图片生成函数：**
+**c) 在 `setup-header-row!` 后面添加水印图片生成和 ZIP 注入函数：**
 
 ```clojure
 (def ^:private watermark-tile-width  220)
@@ -475,6 +474,79 @@ if (userName) {
       (.setTransform g orig-transform))
     (.dispose g)
     img))
+
+(defn- zis->bytes
+  "读取 ZipInputStream 当前 entry 的全部字节。"
+  [^ZipInputStream zis]
+  (let [baos (ByteArrayOutputStream.)
+        buf  (byte-array 4096)]
+    (loop [n (.read zis buf)]
+      (when (pos? n)
+        (.write baos buf 0 n)
+        (recur (.read zis buf))))
+    (.toByteArray baos)))
+
+(defn- inject-picture-element
+  "在 sheet XML 的 <sheetPr> 后插入 <picture r:id=\"rIdWm\"/>。"
+  [^bytes sheet-xml]
+  (let [s (String. sheet-xml "UTF-8")]
+    (if-let [idx (str/index-of s "<sheetPr")]
+      (let [slash      (str/index-of s "/>" idx)
+            close-gt   (str/index-of s ">" idx)
+            self-close (and slash (pos? slash) (or (neg? close-gt) (< slash close-gt)))
+            insert-pos (if self-close
+                         (+ slash 2)
+                         (let [end-tag (str/index-of s "</sheetPr>" idx)]
+                           (if end-tag (+ end-tag 9) (inc close-gt))))]
+        (if (pos? insert-pos)
+          (.getBytes (str (subs s 0 insert-pos) "<picture r:id=\"rIdWm\"/>"
+                          (subs s insert-pos)) "UTF-8")
+          sheet-xml))
+      sheet-xml)))
+
+(defn- inject-rels-entry
+  "在 sheet .rels 文件的 </Relationships> 前插入水印图片关系。"
+  [^bytes rels-xml]
+  (let [s         (String. rels-xml "UTF-8")
+        rel-entry (str "<Relationship Id=\"rIdWm\" "
+                       "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" "
+                       "Target=\"../media/watermark.png\"/>")]
+    (if-let [end-tag (str/last-index-of s "</Relationships>")]
+      (.getBytes (str (subs s 0 end-tag) rel-entry (subs s end-tag)) "UTF-8")
+      rels-xml)))
+
+(defn- inject-background-image
+  "通过 ZIP 底层操作将水印 PNG 注入 XLSX 字节数组，返回新的 XLSX 字节数组。"
+  [^bytes xlsx-bytes ^bytes png-bytes]
+  (let [zout (ByteArrayOutputStream.)
+        zos  (ZipOutputStream. zout)]
+    (with-open [zis (ZipInputStream. (java.io.ByteArrayInputStream. xlsx-bytes))]
+      (loop [entry (.getNextEntry zis)]
+        (when entry
+          (let [name    (.getName entry)
+                content (zis->bytes zis)]
+            (cond
+              (and (.startsWith name "xl/worksheets/sheet")
+                   (.endsWith name ".xml")
+                   (not (.contains name "_rels")))
+              (do (.putNextEntry zos (ZipEntry. name))
+                  (.write zos (inject-picture-element content))
+                  (.closeEntry zos))
+              (and (.startsWith name "xl/worksheets/_rels/sheet")
+                   (.endsWith name ".xml.rels"))
+              (do (.putNextEntry zos (ZipEntry. name))
+                  (.write zos (inject-rels-entry content))
+                  (.closeEntry zos))
+              :else
+              (do (.putNextEntry zos (ZipEntry. name))
+                  (.write zos content)
+                  (.closeEntry zos))))
+          (recur (.getNextEntry zis)))))
+    (.putNextEntry zos (ZipEntry. "xl/media/watermark.png"))
+    (.write zos png-bytes)
+    (.closeEntry zos)
+    (.close zos)
+    (.toByteArray zout)))
 ```
 
 **d) `defmethod streaming-results-writer` 的 let 绑定中添加用户信息 volatiles：**
@@ -499,36 +571,21 @@ if (userName) {
     (vreset! user-email (:email user))))
 ```
 
-**f) 替换 `finish!` 结尾的 `(try ...)` 块为水印注入逻辑：**
+**f) 替换 `finish!` 结尾的 `(try ...)` 块为 ZIP 注入逻辑：**
 
 ```clojure
-;; 有用户：SXSSF → buffer → XSSFWorkbook → 注入背景图片水印 → 写出
+;; 有用户：SXSSF → buffer → ZIP 注入水印 PNG → 写出
 ;; 无用户：直接写到输出流（原始快速路径）
 (if-let [cn @user-common-name]
-  (let [tmp-file (java.io.File/createTempFile "mb-xlsx-" ".tmp")]
-    (try
-      (with-open [fos (java.io.FileOutputStream. tmp-file)]
-        (spreadsheet/save-workbook-into-stream! fos workbook))
-      (.dispose ^SXSSFWorkbook workbook)
-      (with-open [xssf-wb (XSSFWorkbook. tmp-file)]
-        (let [export-time (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))
-              wm-text     (str cn " - " export-time)
-              wm-img      (generate-watermark-image wm-text)
-              img-baos    (ByteArrayOutputStream.)]
-          (ImageIO/write wm-img "png" img-baos)
-          (let [img-bytes (.toByteArray img-baos)]
-            (.addPicture xssf-wb img-bytes Workbook/PICTURE_TYPE_PNG)
-            (when-let [pic-part (last (.getAllPictures xssf-wb))]
-              (let [ppn      (.getPartName (.getPackagePart pic-part))
-                    rel-type (.getRelation XSSFRelation/IMAGES)]
-                (dotimes [i (.getNumberOfSheets xssf-wb)]
-                  (let [^XSSFSheet sheet (.getSheetAt xssf-wb i)
-                        pr (.addRelationship (.getPackagePart sheet) ppn
-                                             TargetMode/INTERNAL rel-type nil)]
-                    (.setId (.addNewPicture (.getCTWorksheet sheet)) (.getId pr))))))))
-        (.write xssf-wb os))
-      (finally
-        (.delete tmp-file))))
+  (let [baos (ByteArrayOutputStream.)]
+    (spreadsheet/save-workbook-into-stream! baos workbook)
+    (.dispose ^SXSSFWorkbook workbook)
+    (let [export-time (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))
+          wm-text     (str cn " - " export-time)
+          wm-img      (generate-watermark-image wm-text)
+          img-baos    (ByteArrayOutputStream.)]
+      (ImageIO/write wm-img "png" img-baos)
+      (.write os (inject-background-image (.toByteArray baos) (.toByteArray img-baos)))))
   ;; 无用户 — 原始保存路径
   (try
     (spreadsheet/save-workbook-into-stream! os workbook)
