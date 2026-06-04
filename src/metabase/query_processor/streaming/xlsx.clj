@@ -32,7 +32,7 @@
     OffsetTime
     ZonedDateTime)
    (java.util UUID)
-   (java.util.zip ZipEntry ZipInputStream ZipOutputStream)
+   (java.util.zip ZipEntry ZipOutputStream)
    (javax.imageio ImageIO)
    (org.apache.poi.ss.usermodel
     Cell
@@ -625,17 +625,6 @@
     (.dispose g)
     img))
 
-(defn- zis->bytes
-  "Read all bytes from the current entry of a ZipInputStream."
-  [^ZipInputStream zis]
-  (let [baos (ByteArrayOutputStream.)
-        buf  (byte-array 4096)]
-    (loop [n (.read zis buf)]
-      (when (pos? n)
-        (.write baos buf 0 n)
-        (recur (.read zis buf))))
-    (.toByteArray baos)))
-
 (defn- inject-picture-element
   "Insert <picture r:id=\"rIdWm\"/> after <sheetPr> in a sheet XML byte array."
   [^bytes sheet-xml]
@@ -666,43 +655,56 @@
       rels-xml)))
 
 (defn- inject-background-image
-  "Inject watermark PNG into an XLSX byte array via ZIP-level manipulation."
-  [^bytes xlsx-bytes ^bytes png-bytes]
-  (let [zout (ByteArrayOutputStream.)
-        zos  (ZipOutputStream. zout)]
-    (with-open [zis (ZipInputStream. (java.io.ByteArrayInputStream. xlsx-bytes))]
-      (loop [entry (.getNextEntry zis)]
-        (when entry
-          (let [name    (.getName entry)
-                content (zis->bytes zis)]
-            (cond
-              ;; sheet XML: inject <picture> after <sheetPr>
-              (and (.startsWith name "xl/worksheets/sheet")
+  "Stream-write an XLSX file with background watermark injected, directly to the
+  given OutputStream.  Uses ZipFile for reliable reading of all entry sizes."
+  [^java.io.File xlsx-file ^bytes png-bytes ^OutputStream out]
+  (let [zos (ZipOutputStream. out)]
+    (with-open [zf (java.util.zip.ZipFile. xlsx-file)]
+      (doseq [^ZipEntry entry (enumeration-seq (.entries zf))]
+        (let [name (.getName entry)]
+          (if (and (.startsWith name "xl/worksheets/sheet")
                    (.endsWith name ".xml")
                    (not (.contains name "_rels")))
+            ;; sheet XML: buffer, inject <picture>, write
+            (let [content (with-open [is (.getInputStream zf entry)]
+                            (let [baos (ByteArrayOutputStream.)
+                                  buf  (byte-array 4096)]
+                              (loop [n (.read is buf)]
+                                (when (pos? n)
+                                  (.write baos buf 0 n)
+                                  (recur (.read is buf))))
+                              (.toByteArray baos)))]
+              (.putNextEntry zos (ZipEntry. name))
+              (.write zos (inject-picture-element content))
+              (.closeEntry zos))
+            (if (and (.startsWith name "xl/worksheets/_rels/sheet")
+                     (.endsWith name ".xml.rels"))
+              ;; sheet rels: buffer, inject relationship, write
+              (let [content (with-open [is (.getInputStream zf entry)]
+                              (let [baos (ByteArrayOutputStream.)
+                                    buf  (byte-array 4096)]
+                                (loop [n (.read is buf)]
+                                  (when (pos? n)
+                                    (.write baos buf 0 n)
+                                    (recur (.read is buf))))
+                                (.toByteArray baos)))]
+                (.putNextEntry zos (ZipEntry. name))
+                (.write zos (inject-rels-entry content))
+                (.closeEntry zos))
+              ;; all other entries: stream directly without buffering
               (do (.putNextEntry zos (ZipEntry. name))
-                  (.write zos (inject-picture-element content))
-                  (.closeEntry zos))
-
-              ;; sheet rels: add watermark image relationship
-              (and (.startsWith name "xl/worksheets/_rels/sheet")
-                   (.endsWith name ".xml.rels"))
-              (do (.putNextEntry zos (ZipEntry. name))
-                  (.write zos (inject-rels-entry content))
-                  (.closeEntry zos))
-
-              ;; all other entries: copy unchanged
-              :else
-              (do (.putNextEntry zos (ZipEntry. name))
-                  (.write zos content)
-                  (.closeEntry zos))))
-          (recur (.getNextEntry zis)))))
+                  (with-open [is (.getInputStream zf entry)]
+                    (let [buf (byte-array 4096)]
+                      (loop [n (.read is buf)]
+                        (when (pos? n)
+                          (.write zos buf 0 n)
+                          (recur (.read is buf))))))
+                  (.closeEntry zos)))))))
     ;; Add watermark image
     (.putNextEntry zos (ZipEntry. "xl/media/watermark.png"))
     (.write zos png-bytes)
     (.closeEntry zos)
-    (.close zos)
-    (.toByteArray zout)))
+    (.close zos)))
 
 ;; Possible Functions: https://poi.apache.org/apidocs/dev/org/apache/poi/ss/usermodel/DataConsolidateFunction.html
 ;; I'm only including the keys that seem to work for our Pivot Tables as of 2024-06-06
@@ -870,15 +872,19 @@
         ;; directly into the XLSX ZIP structure, and write result to output.
         ;; Otherwise, write directly to the output stream (original fast path).
         (if-let [cn @user-common-name]
-          (let [baos (ByteArrayOutputStream.)]
-            (spreadsheet/save-workbook-into-stream! baos workbook)
-            (.dispose ^SXSSFWorkbook workbook)
-            (let [export-time (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))
-                  wm-text     (str cn " - " export-time)
-                  wm-img      (generate-watermark-image wm-text)
-                  img-baos    (ByteArrayOutputStream.)]
-              (ImageIO/write wm-img "png" img-baos)
-              (.write os (inject-background-image (.toByteArray baos) (.toByteArray img-baos)))))
+          (let [tmp-file (java.io.File/createTempFile "mb-xlsx-" ".tmp")]
+            (try
+              (with-open [fos (java.io.FileOutputStream. tmp-file)]
+                (spreadsheet/save-workbook-into-stream! fos workbook))
+              (.dispose ^SXSSFWorkbook workbook)
+              (let [export-time (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))
+                    wm-text     (str cn " - " export-time)
+                    wm-img      (generate-watermark-image wm-text)
+                    img-baos    (ByteArrayOutputStream.)]
+                (ImageIO/write wm-img "png" img-baos)
+                (inject-background-image tmp-file (.toByteArray img-baos) os))
+              (finally
+                (.delete tmp-file))))
           ;; No user — original save path (known to work)
           (try
             (spreadsheet/save-workbook-into-stream! os workbook)

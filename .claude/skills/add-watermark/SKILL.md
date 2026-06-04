@@ -443,7 +443,7 @@ if (userName) {
 (java.awt Color Font Graphics2D RenderingHints)
 (java.awt.image BufferedImage)
 (java.io ByteArrayOutputStream OutputStream)
-(java.util.zip ZipEntry ZipInputStream ZipOutputStream)
+(java.util.zip ZipEntry ZipOutputStream)
 (javax.imageio ImageIO)
 ```
 
@@ -475,17 +475,6 @@ if (userName) {
     (.dispose g)
     img))
 
-(defn- zis->bytes
-  "读取 ZipInputStream 当前 entry 的全部字节。"
-  [^ZipInputStream zis]
-  (let [baos (ByteArrayOutputStream.)
-        buf  (byte-array 4096)]
-    (loop [n (.read zis buf)]
-      (when (pos? n)
-        (.write baos buf 0 n)
-        (recur (.read zis buf))))
-    (.toByteArray baos)))
-
 (defn- inject-picture-element
   "在 sheet XML 的 <sheetPr> 后插入 <picture r:id=\"rIdWm\"/>。"
   [^bytes sheet-xml]
@@ -516,37 +505,56 @@ if (userName) {
       rels-xml)))
 
 (defn- inject-background-image
-  "通过 ZIP 底层操作将水印 PNG 注入 XLSX 字节数组，返回新的 XLSX 字节数组。"
-  [^bytes xlsx-bytes ^bytes png-bytes]
-  (let [zout (ByteArrayOutputStream.)
-        zos  (ZipOutputStream. zout)]
-    (with-open [zis (ZipInputStream. (java.io.ByteArrayInputStream. xlsx-bytes))]
-      (loop [entry (.getNextEntry zis)]
-        (when entry
-          (let [name    (.getName entry)
-                content (zis->bytes zis)]
-            (cond
-              (and (.startsWith name "xl/worksheets/sheet")
+  "使用 ZipFile 读取 XLSX 临时文件，将水印 PNG 注入后直接流式写入 OutputStream。
+  XML 类 entry 缓冲后修改，其他 entry 直接流式复制（零缓冲）。"
+  [^java.io.File xlsx-file ^bytes png-bytes ^OutputStream out]
+  (let [zos (ZipOutputStream. out)]
+    (with-open [zf (java.util.zip.ZipFile. xlsx-file)]
+      (doseq [^ZipEntry entry (enumeration-seq (.entries zf))]
+        (let [name (.getName entry)]
+          (if (and (.startsWith name "xl/worksheets/sheet")
                    (.endsWith name ".xml")
                    (not (.contains name "_rels")))
+            ;; sheet XML: 缓冲后注入 <picture>
+            (let [content (with-open [is (.getInputStream zf entry)]
+                            (let [baos (ByteArrayOutputStream.)
+                                  buf  (byte-array 4096)]
+                              (loop [n (.read is buf)]
+                                (when (pos? n)
+                                  (.write baos buf 0 n)
+                                  (recur (.read is buf))))
+                              (.toByteArray baos)))]
+              (.putNextEntry zos (ZipEntry. name))
+              (.write zos (inject-picture-element content))
+              (.closeEntry zos))
+            (if (and (.startsWith name "xl/worksheets/_rels/sheet")
+                     (.endsWith name ".xml.rels"))
+              ;; sheet rels: 缓冲后注入关系
+              (let [content (with-open [is (.getInputStream zf entry)]
+                              (let [baos (ByteArrayOutputStream.)
+                                    buf  (byte-array 4096)]
+                                (loop [n (.read is buf)]
+                                  (when (pos? n)
+                                    (.write baos buf 0 n)
+                                    (recur (.read is buf))))
+                                (.toByteArray baos)))]
+                (.putNextEntry zos (ZipEntry. name))
+                (.write zos (inject-rels-entry content))
+                (.closeEntry zos))
+              ;; 其他 entry: 直接流式复制，零缓冲
               (do (.putNextEntry zos (ZipEntry. name))
-                  (.write zos (inject-picture-element content))
-                  (.closeEntry zos))
-              (and (.startsWith name "xl/worksheets/_rels/sheet")
-                   (.endsWith name ".xml.rels"))
-              (do (.putNextEntry zos (ZipEntry. name))
-                  (.write zos (inject-rels-entry content))
-                  (.closeEntry zos))
-              :else
-              (do (.putNextEntry zos (ZipEntry. name))
-                  (.write zos content)
-                  (.closeEntry zos))))
-          (recur (.getNextEntry zis)))))
+                  (with-open [is (.getInputStream zf entry)]
+                    (let [buf (byte-array 4096)]
+                      (loop [n (.read is buf)]
+                        (when (pos? n)
+                          (.write zos buf 0 n)
+                          (recur (.read is buf))))))
+                  (.closeEntry zos)))))))
+    ;; 添加水印图片
     (.putNextEntry zos (ZipEntry. "xl/media/watermark.png"))
     (.write zos png-bytes)
     (.closeEntry zos)
-    (.close zos)
-    (.toByteArray zout)))
+    (.close zos)))
 ```
 
 **d) `defmethod streaming-results-writer` 的 let 绑定中添加用户信息 volatiles：**
@@ -571,21 +579,25 @@ if (userName) {
     (vreset! user-email (:email user))))
 ```
 
-**f) 替换 `finish!` 结尾的 `(try ...)` 块为 ZIP 注入逻辑：**
+**f) 替换 `finish!` 结尾的 `(try ...)` 块为流式 ZIP 注入逻辑：**
 
 ```clojure
-;; 有用户：SXSSF → buffer → ZIP 注入水印 PNG → 写出
+;; 有用户：SXSSF → temp file → ZipFile 读取 → 注入水印 → 流式写 HTTP 响应
 ;; 无用户：直接写到输出流（原始快速路径）
 (if-let [cn @user-common-name]
-  (let [baos (ByteArrayOutputStream.)]
-    (spreadsheet/save-workbook-into-stream! baos workbook)
-    (.dispose ^SXSSFWorkbook workbook)
-    (let [export-time (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))
-          wm-text     (str cn " - " export-time)
-          wm-img      (generate-watermark-image wm-text)
-          img-baos    (ByteArrayOutputStream.)]
-      (ImageIO/write wm-img "png" img-baos)
-      (.write os (inject-background-image (.toByteArray baos) (.toByteArray img-baos)))))
+  (let [tmp-file (java.io.File/createTempFile "mb-xlsx-" ".tmp")]
+    (try
+      (with-open [fos (java.io.FileOutputStream. tmp-file)]
+        (spreadsheet/save-workbook-into-stream! fos workbook))
+      (.dispose ^SXSSFWorkbook workbook)
+      (let [export-time (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))
+            wm-text     (str cn " - " export-time)
+            wm-img      (generate-watermark-image wm-text)
+            img-baos    (ByteArrayOutputStream.)]
+        (ImageIO/write wm-img "png" img-baos)
+        (inject-background-image tmp-file (.toByteArray img-baos) os))
+      (finally
+        (.delete tmp-file))))
   ;; 无用户 — 原始保存路径
   (try
     (spreadsheet/save-workbook-into-stream! os workbook)
