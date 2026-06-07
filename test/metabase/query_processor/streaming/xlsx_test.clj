@@ -3,6 +3,7 @@
    [clojure.java.io :as io]
    [clojure.test :refer :all]
    [dk.ative.docjure.spreadsheet :as spreadsheet]
+   [metabase.api.common :as api]
    [metabase.driver :as driver]
    [metabase.models.visualization-settings :as mb.viz]
    [metabase.query-processor.streaming.common :as streaming.common]
@@ -792,3 +793,96 @@
     (binding [qp.xlsx/*number-of-characters-cell* 5]
       (is (= ["abcde"]
              (second (xlsx-export [{:id 0, :name "Col"}] {} [["abcdefghijklmnopqrstuvwxyz"]])))))))
+
+;;; +----------------------------------------------------------------------------------------------------------------+
+;;; |                                       Watermark background-image tests                                         |
+;;; +----------------------------------------------------------------------------------------------------------------+
+
+(defn- xlsx-entries
+  "Return a set of zip entry names from an XLSX byte array."
+  ^java.util.Set [bytea]
+  (let [tmp (java.io.File/createTempFile "xlsx-entries-" ".xlsx")]
+    (try
+      (with-open [os (java.io.FileOutputStream. tmp)]
+        (.write os bytea))
+      (with-open [zf (java.util.zip.ZipFile. tmp)]
+        (let [names (java.util.HashSet.)]
+          (doseq [^java.util.zip.ZipEntry e (enumeration-seq (.entries zf))]
+            (.add names (.getName e)))
+          names))
+      (finally
+        (.delete tmp)))))
+
+(defn- xlsx-export-bytes
+  "Run the streaming writer and return the raw XLSX bytes."
+  [ordered-cols viz-settings rows]
+  (with-open [bos (ByteArrayOutputStream.)
+              os  (BufferedOutputStream. bos)]
+    (let [results-writer (qp.si/streaming-results-writer :xlsx os)]
+      (qp.si/begin! results-writer {:data {:ordered-cols ordered-cols}}
+                    viz-settings)
+      (doall (map-indexed
+              (fn [i row] (qp.si/write-row! results-writer row i ordered-cols viz-settings))
+              rows))
+      (qp.si/finish! results-writer {:row_count (count rows)}))
+    (.toByteArray bos)))
+
+(defn- make-row [n n-cols]
+  (vec (for [i (range n-cols)] (str "r" n "-c" i "-" (apply str (repeat 200 \x))))))
+
+(deftest watermark-threshold-test
+  (testing "When a user is logged in and the XLSX is small (≤ 1MB), the background watermark image is injected"
+    (binding [metabase.api.common/*current-user-id* 1
+              metabase.api.common/*current-user*    (atom {:id 1 :first_name "三" :last_name "张" :email "test@example.com"})]
+      (let [n-cols   6
+            cols     (vec (for [i (range n-cols)] {:id i, :name (str "Col" i)}))
+            rows     (mapv #(make-row % n-cols) (range 100))
+            bytea    (xlsx-export-bytes cols {} rows)
+            entries  (xlsx-entries bytea)]
+        (is (<= (alength bytea) qp.xlsx/watermark-max-file-size)
+            (str "Test data should be small enough to fall under the 1MB threshold; actual size = "
+                 (alength bytea) " bytes"))
+        (is (contains? entries "xl/media/watermark.png")
+            "Small file should contain the watermark image"))))
+  (testing "When a user is logged in and the XLSX is large (> 1MB), the background watermark is skipped"
+    (binding [metabase.api.common/*current-user-id* 1
+              metabase.api.common/*current-user*    (atom {:id 1 :first_name "三" :last_name "张" :email "test@example.com"})]
+      (let [n-cols   10
+            ;; 10 cols × 50000 rows × 50 chars per cell with random data ≈ > 1MB
+            cols     (vec (for [i (range n-cols)] {:id i, :name (str "Col" i)}))
+            big-row  (vec (for [i (range n-cols)]
+                            (format "%08d-%s-%05d-%s"
+                                    (rand-int 100000000)
+                                    (subs (str (java.util.UUID/randomUUID)) 0 16)
+                                    (rand-int 100000)
+                                    (subs (str (java.util.UUID/randomUUID)) 0 16))))
+            rows     (vec (repeat 50000 big-row))
+            t0       (System/nanoTime)
+            bytea    (xlsx-export-bytes cols {} rows)
+            elapsed  (/ (- (System/nanoTime) t0) 1e9)
+            entries  (xlsx-entries bytea)]
+        (is (> (alength bytea) qp.xlsx/watermark-max-file-size)
+            (str "Test data should exceed 1MB; actual size = " (alength bytea) " bytes"))
+        (is (not (contains? entries "xl/media/watermark.png"))
+            "Large file should NOT contain the watermark image")
+        (println (format "[watermark-threshold] large-file size = %d bytes (%.2f MB), elapsed = %.3fs, watermark = %s"
+                         (alength bytea)
+                         (/ (double (alength bytea)) 1048576.0)
+                         elapsed
+                         (contains? entries "xl/media/watermark.png"))))))
+  (testing "When no user is logged in, no watermark is added regardless of size"
+    (binding [metabase.api.common/*current-user-id* nil
+              metabase.api.common/*current-user*    (atom nil)]
+      (let [n-cols   10
+            cols     (vec (for [i (range n-cols)] {:id i, :name (str "Col" i)}))
+            big-row  (vec (for [i (range n-cols)]
+                            (format "%08d-%s-%05d-%s"
+                                    (rand-int 100000000)
+                                    (subs (str (java.util.UUID/randomUUID)) 0 16)
+                                    (rand-int 100000)
+                                    (subs (str (java.util.UUID/randomUUID)) 0 16))))
+            rows     (vec (repeat 50000 big-row))
+            bytea    (xlsx-export-bytes cols {} rows)
+            entries  (xlsx-entries bytea)]
+        (is (not (contains? entries "xl/media/watermark.png"))
+            "Anonymous user should not have a watermark")))))

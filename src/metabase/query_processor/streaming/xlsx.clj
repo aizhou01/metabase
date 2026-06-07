@@ -5,6 +5,7 @@
    [dk.ative.docjure.spreadsheet :as spreadsheet] ; codespell:ignore ative
    [java-time.api :as t]
    [medley.core :as m]
+   [metabase.api.common :as api]
    [metabase.formatter.core :as formatter]
    [metabase.lib.schema.temporal-bucketing :as lib.schema.temporal-bucketing]
    [metabase.models.visualization-settings :as mb.viz]
@@ -37,7 +38,12 @@
     Workbook)
    (org.apache.poi.ss.util CellRangeAddress)
    (org.apache.poi.xssf.streaming SXSSFRow SXSSFSheet SXSSFWorkbook)
-   (org.apache.poi.xssf.usermodel XSSFRow XSSFSheet)))
+   (org.apache.poi.xssf.usermodel XSSFRow XSSFSheet)
+   (java.awt Color Font Graphics2D RenderingHints)
+   (java.awt.image BufferedImage)
+   (java.io ByteArrayOutputStream FileInputStream FileOutputStream)
+   (java.util.zip ZipEntry ZipFile ZipOutputStream)
+   (javax.imageio ImageIO)))
 
 (set! *warn-on-reflection* true)
 
@@ -594,6 +600,108 @@
     (.setAutoFilter ^SXSSFSheet sheet (new CellRangeAddress 0 0 0 (dec col-count)))
     (.createFreezePane ^SXSSFSheet sheet 0 1)))
 
+;; ── Watermark ──────────────────────────────────────────────────────────────────
+
+(def watermark-max-file-size
+  "最大文件大小（字节），超过此大小则不添加背景图水印，默认 1MB。"
+  (* 1 1024 1024))
+
+(def ^:private watermark-tile-width  220)
+(def ^:private watermark-tile-height 220)
+
+(defn- generate-watermark-image
+  ^BufferedImage [^String text]
+  (let [img (BufferedImage. watermark-tile-width watermark-tile-height BufferedImage/TYPE_INT_ARGB)
+        g   (.createGraphics img)]
+    (.setRenderingHint g RenderingHints/KEY_ANTIALIASING RenderingHints/VALUE_ANTIALIAS_ON)
+    (.setRenderingHint g RenderingHints/KEY_TEXT_ANTIALIASING RenderingHints/VALUE_TEXT_ANTIALIAS_ON)
+    (.setFont g (Font. "SansSerif" Font/PLAIN 24))
+    (.setColor g (Color. 0x94 0x9a 0xab 77))
+    (let [fm          (.getFontMetrics g)
+          text-width  (.stringWidth fm text)
+          cx          (/ watermark-tile-width 2.0)
+          cy          (/ watermark-tile-height 2.0)
+          orig-transform (.getTransform g)]
+      (.rotate g (Math/toRadians -45.0) cx cy)
+      (.drawString g text (- cx (/ text-width 2.0)) cy)
+      (.setTransform g orig-transform))
+    (.dispose g)
+    img))
+
+(defn- inject-picture-element
+  "Insert <picture> before <sheetData>."
+  [^bytes sheet-xml]
+  (let [s (String. sheet-xml "UTF-8")]
+    (if-let [idx (str/index-of s "<sheetData")]
+      (let [wm-tag (str "<picture r:id=\"rIdWm\"/>")]
+        (.getBytes (str (subs s 0 idx) wm-tag (subs s idx)) "UTF-8"))
+      sheet-xml)))
+
+(defn- inject-rels-entry
+  "Insert image relationship before </Relationships>."
+  [^bytes rels-xml]
+  (let [s         (String. rels-xml "UTF-8")
+        rel-entry (str "<Relationship Id=\"rIdWm\" "
+                       "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" "
+                       "Target=\"../media/watermark.png\"/>")]
+    (if-let [end-tag (str/last-index-of s "</Relationships>")]
+      (.getBytes (str (subs s 0 end-tag) rel-entry (subs s end-tag)) "UTF-8")
+      rels-xml)))
+
+(defn- inject-background-image
+  "ZipFile-read, stream-write XLSX with watermark injected."
+  [^java.io.File xlsx-file ^bytes png-bytes ^OutputStream out]
+  (let [zos (ZipOutputStream. out)]
+    (with-open [zf (ZipFile. xlsx-file)]
+      (doseq [^ZipEntry entry (enumeration-seq (.entries zf))]
+        (let [name (.getName entry)]
+          (cond
+            (and (.startsWith name "xl/worksheets/sheet")
+                 (.endsWith name ".xml")
+                 (not (.contains name "_rels")))
+            (let [content (with-open [is (.getInputStream zf entry)]
+                            (let [baos (ByteArrayOutputStream.) buf (byte-array 4096)]
+                              (loop [n (.read is buf)]
+                                (when (pos? n) (.write baos buf 0 n) (recur (.read is buf))))
+                              (.toByteArray baos)))]
+              (.putNextEntry zos (ZipEntry. name))
+              (.write zos (inject-picture-element content))
+              (.closeEntry zos))
+
+            (and (.startsWith name "xl/worksheets/_rels/sheet")
+                 (.endsWith name ".xml.rels"))
+            (let [content (with-open [is (.getInputStream zf entry)]
+                            (let [baos (ByteArrayOutputStream.) buf (byte-array 4096)]
+                              (loop [n (.read is buf)]
+                                (when (pos? n) (.write baos buf 0 n) (recur (.read is buf))))
+                              (.toByteArray baos)))]
+              (.putNextEntry zos (ZipEntry. name))
+              (.write zos (inject-rels-entry content))
+              (.closeEntry zos))
+
+            :else
+            (do (.putNextEntry zos (ZipEntry. name))
+                (with-open [is (.getInputStream zf entry)]
+                  (let [buf (byte-array 4096)]
+                    (loop [n (.read is buf)]
+                      (when (pos? n) (.write zos buf 0 n) (recur (.read is buf))))))
+                (.closeEntry zos))))))
+    (.putNextEntry zos (ZipEntry. "xl/media/watermark.png"))
+    (.write zos png-bytes)
+    (.closeEntry zos)
+    (.close zos)))
+
+(defn- stream-file-to-output
+  "Copy file bytes to OutputStream without watermark."
+  [^java.io.File f ^OutputStream os]
+  (with-open [fis (FileInputStream. f)]
+    (let [buf (byte-array 8192)]
+      (loop [n (.read fis buf)]
+        (when (pos? n)
+          (.write os buf 0 n)
+          (recur (.read fis buf))))))
+  (.flush os))
+
 ;; Possible Functions: https://poi.apache.org/apidocs/dev/org/apache/poi/ss/usermodel/DataConsolidateFunction.html
 ;; I'm only including the keys that seem to work for our Pivot Tables as of 2024-06-06
 (defn- col->aggregation-fn
@@ -674,12 +782,16 @@
         workbook-sheet       (volatile! nil)
         styles               (volatile! nil)
         pivot-data           (volatile! nil)
-        pivot-grouping-index (volatile! nil)]
+        pivot-grouping-index (volatile! nil)
+        user-common-name     (volatile! nil)]
     (reify qp.si/StreamingResultsWriter
       (begin! [_ {{:keys [ordered-cols results_timezone format-rows? pivot? pivot-export-options]
                    :or   {format-rows? true
                           pivot?       false}} :data}
                viz-settings]
+        (when api/*current-user-id*
+          (when-let [user @api/*current-user*]
+            (vreset! user-common-name (str (:last_name user) (:first_name user)))))
         (let [pivot-spec       (when (and pivot? pivot-export-options (qp.settings/enable-pivoted-exports))
                                  (pivot-opts->pivot-spec (merge {:pivot-cols []
                                                                  :pivot-rows []}
@@ -758,8 +870,26 @@
                   @pivot-data)
           ;; Auto-size columns if we never hit the row threshold, or a final row count was not provided
           (autosize-columns! @workbook-sheet))
-        (try
-          (spreadsheet/save-workbook-into-stream! os workbook)
-          (finally
-            (.dispose ^SXSSFWorkbook workbook)
-            (.close os)))))))
+        (if @user-common-name
+          (let [tmp-file (java.io.File/createTempFile "mb-xlsx-" ".tmp")]
+            (try
+              (with-open [fos (FileOutputStream. tmp-file)]
+                (spreadsheet/save-workbook-into-stream! fos workbook))
+              (.dispose ^SXSSFWorkbook workbook)
+              (if (<= (.length tmp-file) watermark-max-file-size)
+                ;; 文件 ≤ 1MB：打背景图水印
+                (let [export-time (t/format "yyyy-MM-dd HH:mm" (t/zoned-date-time))
+                      wm-text     (str @user-common-name " - " export-time)
+                      wm-img      (generate-watermark-image wm-text)
+                      img-baos    (ByteArrayOutputStream.)]
+                  (ImageIO/write wm-img "png" img-baos)
+                  (inject-background-image tmp-file (.toByteArray img-baos) os))
+                ;; 文件 > 1MB：直接输出，不打水印
+                (stream-file-to-output tmp-file os))
+              (finally
+                (.delete tmp-file))))
+          (try
+            (spreadsheet/save-workbook-into-stream! os workbook)
+            (finally
+              (.dispose ^SXSSFWorkbook workbook)
+              (.close os))))))))
